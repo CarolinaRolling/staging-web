@@ -421,16 +421,20 @@ function normalizeGrade(g) {
   return g.trim();
 }
 
-// ─── PDF text extraction ────────────────────────────────────────────────────
+// ─── PDF text extraction (with OCR fallback for scanned PDFs) ────────────────
 
-async function extractTextFromPDF(file) {
+async function extractTextFromPDF(file, onStatus) {
   const pdfjsLib = window.pdfjsLib;
   if (!pdfjsLib) throw new Error('PDF.js library not loaded. Please refresh the page.');
 
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   let fullText = '';
+  let totalChars = 0;
 
+  if (onStatus) onStatus(`Extracting text from ${pdf.numPages} page(s)...`);
+
+  // First pass: try native text extraction
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
     const textContent = await page.getTextContent();
@@ -457,22 +461,67 @@ async function extractTextFromPDF(file) {
         currentLine = item.text;
         currentY = item.y;
       } else {
-        // Add spacing if there's a gap
-        const gap = item.x - (currentLine.length * 4); // rough estimate
+        const gap = item.x - (currentLine.length * 4);
         currentLine += (gap > 20 ? '  ' : ' ') + item.text;
       }
     }
     if (currentLine.trim()) pageLines.push(currentLine.trim());
 
-    fullText += pageLines.join('\n') + '\n--- PAGE BREAK ---\n';
+    const pageText = pageLines.join('\n');
+    totalChars += pageText.replace(/\s/g, '').length;
+    fullText += pageText + '\n--- PAGE BREAK ---\n';
   }
 
-  return fullText;
+  // If we got meaningful text, return it
+  // Threshold: at least 20 non-whitespace chars per page on average
+  if (totalChars > pdf.numPages * 20) {
+    return fullText;
+  }
+
+  // Second pass: OCR fallback for scanned PDFs
+  if (onStatus) onStatus('Scanned PDF detected — running OCR (this may take a moment)...');
+  
+  const Tesseract = window.Tesseract;
+  if (!Tesseract) throw new Error('OCR library not loaded. Please refresh the page.');
+
+  let ocrText = '';
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    if (onStatus) onStatus(`OCR: Processing page ${pageNum} of ${pdf.numPages}...`);
+    
+    const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 2.0 }); // Higher scale = better OCR
+    
+    // Render page to canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    
+    // Run OCR on the rendered image
+    try {
+      const result = await Tesseract.recognize(canvas, 'eng', {
+        logger: () => {} // suppress progress logs
+      });
+      ocrText += result.data.text + '\n--- PAGE BREAK ---\n';
+    } catch (ocrErr) {
+      console.error(`OCR failed on page ${pageNum}:`, ocrErr);
+      ocrText += `[OCR failed on page ${pageNum}]\n--- PAGE BREAK ---\n`;
+    }
+    
+    // Cleanup
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
+  return ocrText;
 }
 
-async function extractTextFromFile(file) {
+async function extractTextFromFile(file, onStatus) {
   if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-    return await extractTextFromPDF(file);
+    return await extractTextFromPDF(file, onStatus);
   }
   // Text file
   return await file.text();
@@ -489,6 +538,7 @@ export default function ImportPartsModal({ isOpen, onClose, onImportParts, estim
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
   const [error, setError] = useState(null);
+  const [statusMsg, setStatusMsg] = useState('');
   const [showRawText, setShowRawText] = useState(false);
   const [editingIdx, setEditingIdx] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -503,6 +553,7 @@ export default function ImportPartsModal({ isOpen, onClose, onImportParts, estim
     setImporting(false);
     setImportProgress(0);
     setError(null);
+    setStatusMsg('');
     setShowRawText(false);
     setEditingIdx(null);
   };
@@ -521,18 +572,24 @@ export default function ImportPartsModal({ isOpen, onClose, onImportParts, estim
     }
     setFile(selectedFile);
     setError(null);
+    setStep('processing');
+    setStatusMsg('Reading file...');
 
     try {
-      const text = await extractTextFromFile(selectedFile);
+      const text = await extractTextFromFile(selectedFile, (status) => setStatusMsg(status));
       setRawText(text);
+      setStatusMsg('Parsing parts...');
       const parts = parseExtractedText(text);
       setParsedParts(parts);
       // Select all by default
       setSelectedParts(new Set(parts.map((_, i) => i)));
+      setStatusMsg('');
       setStep('review');
     } catch (err) {
       console.error('File processing error:', err);
       setError(`Failed to process file: ${err.message}`);
+      setStep('upload');
+      setStatusMsg('');
     }
   }, []);
 
@@ -666,7 +723,7 @@ export default function ImportPartsModal({ isOpen, onClose, onImportParts, estim
                   Drop file here or click to browse
                 </div>
                 <div style={{ color: '#999', fontSize: '0.9rem' }}>
-                  Supports PDF and TXT files
+                  Supports PDF (including scanned) and TXT files
                 </div>
               </div>
               <input
@@ -682,9 +739,25 @@ export default function ImportPartsModal({ isOpen, onClose, onImportParts, estim
                 <div style={{ fontWeight: 600, marginBottom: 8 }}>Supported Formats:</div>
                 <div style={{ fontSize: '0.9rem', color: '#666', lineHeight: 1.6 }}>
                   <div>📄 <strong>Purchase Orders (PDF)</strong> — Extracts plate roll specs, dimensions, roll-to values</div>
+                  <div>🔍 <strong>Scanned PDFs</strong> — Automatic OCR for image-based documents</div>
                   <div>📝 <strong>Parts Lists (TXT)</strong> — Parses specs like "5 pcs 1/2" A36 8 x 133.92 R/T to a 42.125" ID"</div>
                   <div>📋 <strong>BOM Tables (TXT)</strong> — Reads tabular formats with columns for qty, part#, description, material</div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {step === 'processing' && (
+            <div style={{ textAlign: 'center', padding: '60px 24px' }}>
+              <div className="spinner" style={{ width: 48, height: 48, margin: '0 auto 20px' }}></div>
+              <div style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: 8 }}>
+                Processing {file?.name}
+              </div>
+              <div style={{ color: '#666', fontSize: '0.95rem' }}>
+                {statusMsg || 'Reading file...'}
+              </div>
+              <div style={{ color: '#999', fontSize: '0.8rem', marginTop: 12 }}>
+                Scanned PDFs may take 10-30 seconds per page for OCR
               </div>
             </div>
           )}
