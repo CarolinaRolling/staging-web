@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Upload, Database, Settings, FileText, Package, ClipboardList, DollarSign, AlertTriangle } from 'lucide-react';
-import { getBackupInfo, downloadBackup, restoreBackup } from '../services/api';
+import { Download, Upload, Database, Settings, FileText, Package, ClipboardList, DollarSign, AlertTriangle, Clock } from 'lucide-react';
+import { getBackupInfo, downloadBackup, restoreBackup, runBackgroundBackup } from '../services/api';
 
 function BackupPage() {
   const [backupInfo, setBackupInfo] = useState(null);
@@ -17,6 +17,7 @@ function BackupPage() {
     includeEstimates: true,
     includeInbound: true,
     includeSettings: true,
+    includeFiles: false,
   });
 
   const [restoreOptions, setRestoreOptions] = useState({
@@ -24,6 +25,8 @@ function BackupPage() {
   });
 
   const [uploadedBackup, setUploadedBackup] = useState(null);
+  const [bgBackupStarted, setBgBackupStarted] = useState(false);
+  const [bgEmail, setBgEmail] = useState('jason@carolinarolling.com');
 
   useEffect(() => {
     loadBackupInfo();
@@ -53,7 +56,7 @@ function BackupPage() {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `backup-${new Date().toISOString().split('T')[0]}.json`;
+      link.download = `backup-${new Date().toISOString().split('T')[0]}${backupOptions.includeFiles ? '-with-files' : ''}.json`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -116,6 +119,18 @@ function BackupPage() {
       setError('Failed to restore backup');
     } finally {
       setRestoring(false);
+    }
+  };
+
+  const handleBackgroundBackup = async () => {
+    if (!bgEmail.trim()) { setError('Please enter an email address'); return; }
+    try {
+      setBgBackupStarted(true);
+      const res = await runBackgroundBackup({ includeFiles: true, email: bgEmail.trim() });
+      setSuccess(res.data.message || 'Backup started — check your email when complete');
+    } catch (err) {
+      setError('Failed to start background backup');
+      setBgBackupStarted(false);
     }
   };
 
@@ -202,12 +217,27 @@ function BackupPage() {
             </div>
           </div>
 
+          <div style={{ marginBottom: 16, padding: 12, border: '2px solid #ff9800', borderRadius: 8, background: '#fff8e1' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={backupOptions.includeFiles}
+                onChange={(e) => setBackupOptions({ ...backupOptions, includeFiles: e.target.checked })} />
+              <div>
+                <strong>📎 Include PDFs & CAD Files</strong>
+                <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                  Downloads all PDFs, STEP, DXF, and DWG files from Cloudinary into the backup.
+                  This makes the backup much larger but ensures full disaster recovery.
+                  {backupOptions.includeFiles && <span style={{ color: '#e65100', fontWeight: 600 }}> — This may take several minutes.</span>}
+                </div>
+              </div>
+            </label>
+          </div>
+
           <button className="btn btn-primary" style={{ width: '100%' }} onClick={handleDownloadBackup} disabled={downloading}>
             <Download size={18} />
-            {downloading ? 'Preparing Download...' : 'Download Full Backup'}
+            {downloading ? (backupOptions.includeFiles ? 'Downloading files from Cloudinary...' : 'Preparing Download...') : (backupOptions.includeFiles ? 'Download Full Backup + Files' : 'Download Full Backup')}
           </button>
           <p style={{ fontSize: '0.8rem', color: '#666', marginTop: 8, textAlign: 'center' }}>
-            Backup file will be saved as: backup-{new Date().toISOString().split('T')[0]}.json
+            Backup file will be saved as: backup-{new Date().toISOString().split('T')[0]}{backupOptions.includeFiles ? '-with-files' : ''}.json
           </p>
         </div>
 
@@ -259,6 +289,8 @@ function BackupPage() {
                       {uploadedBackup.counts.estimates > 0 && <li>{uploadedBackup.counts.estimates} estimates</li>}
                       {uploadedBackup.counts.inboundOrders > 0 && <li>{uploadedBackup.counts.inboundOrders} inbound orders</li>}
                       {uploadedBackup.counts.settings > 0 && <li>{uploadedBackup.counts.settings} settings</li>}
+                      {uploadedBackup.counts._files && <li style={{ color: '#1565c0', fontWeight: 600 }}>{uploadedBackup.counts._files.downloaded} PDF/CAD files included</li>}
+                      {uploadedBackup.files && Object.keys(uploadedBackup.files).length > 0 && !uploadedBackup.counts._files && <li style={{ color: '#1565c0', fontWeight: 600 }}>{Object.keys(uploadedBackup.files).length} PDF/CAD files included</li>}
                     </ul>
                   </div>
                 )}
@@ -315,6 +347,61 @@ function BackupPage() {
             <div style={{ color: '#666' }}>Inbound Orders</div>
           </div>
         </div>
+      </div>
+
+      {/* Auto-Backup Schedule */}
+      <div className="card" style={{ marginTop: 16, background: '#f0f7ff', border: '1px solid #bbdefb' }}>
+        <h3 className="card-title" style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Clock size={20} />
+          Scheduled Auto-Backup
+        </h3>
+        <p style={{ fontSize: '0.9rem', color: '#333', marginBottom: 8 }}>
+          Full backups (including PDFs & CAD files) run automatically <strong>every Friday at midnight Pacific</strong> and are stored on Cloudinary.
+        </p>
+        
+        {/* Run Now */}
+        <div style={{ background: 'white', borderRadius: 8, padding: 16, border: '1px solid #e0e0e0', marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>Run Backup Now</div>
+          <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: 10 }}>
+            Start a full backup with all PDFs & CAD files in the background. You'll get an email when it's done.
+          </p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input type="email" className="form-input" placeholder="Email for notification"
+              value={bgEmail} onChange={(e) => setBgEmail(e.target.value)}
+              style={{ flex: 1, minWidth: 200, maxWidth: 300 }} />
+            <button className="btn btn-primary" onClick={handleBackgroundBackup}
+              disabled={bgBackupStarted} style={{ whiteSpace: 'nowrap' }}>
+              {bgBackupStarted ? '✅ Backup Running...' : '🚀 Run Backup Now'}
+            </button>
+          </div>
+          {bgBackupStarted && (
+            <div style={{ marginTop: 8, fontSize: '0.85rem', color: '#2e7d32', fontWeight: 600 }}>
+              Backup is running in the background. You can close this page — the email will arrive when it's done.
+            </div>
+          )}
+        </div>
+
+        {backupInfo?.lastAutoBackup && (
+          <div style={{ background: 'white', borderRadius: 6, padding: 12, fontSize: '0.85rem', border: '1px solid #e0e0e0', marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>Last Auto-Backup</div>
+            <div style={{ color: '#666' }}>
+              {new Date(backupInfo.lastAutoBackup.createdAt).toLocaleString()} — {((backupInfo.lastAutoBackup.size || 0) / 1024).toFixed(0)}KB compressed
+              {backupInfo.lastAutoBackup.duration && ` — ${backupInfo.lastAutoBackup.duration}`}
+            </div>
+          </div>
+        )}
+        {backupInfo?.cloudBackups?.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: 6 }}>Recent Cloud Backups ({backupInfo.cloudBackups.length})</div>
+            {backupInfo.cloudBackups.slice(0, 5).map((b, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #eee', fontSize: '0.8rem' }}>
+                <span style={{ color: '#666' }}>{new Date(b.createdAt).toLocaleString()}</span>
+                <span style={{ color: '#888' }}>{((b.size || 0) / 1024).toFixed(0)}KB</span>
+                <a href={b.url} target="_blank" rel="noopener noreferrer" style={{ color: '#1976d2', textDecoration: 'none', fontWeight: 600 }}>Download</a>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

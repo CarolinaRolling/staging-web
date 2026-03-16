@@ -291,6 +291,7 @@ export const getEmailLogs = () => api.get('/email/logs');
 export const getBackupInfo = () => api.get('/backup/info');
 export const downloadBackup = (params) => api.get('/backup', { params });
 export const restoreBackup = (data) => api.post('/backup/restore', data);
+export const runBackgroundBackup = (data) => api.post('/backup/run-background', data);
 
 // Email Settings
 export const getNotificationEmail = () => api.get('/settings/notification-email');
