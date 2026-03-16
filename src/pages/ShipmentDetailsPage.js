@@ -16,6 +16,7 @@ import {
   deleteDocument,
   getLocations,
   getDocumentSignedUrl,
+  downloadShipmentDocument,
   getWorkOrders,
   linkShipmentToWorkOrder
 } from '../services/api';
@@ -636,13 +637,21 @@ function ShipmentDetailsPage() {
                         className="btn btn-sm btn-primary"
                         onClick={async () => {
                           try {
-                            // Get signed URL from backend
-                            const signedData = await getDocumentSignedUrl(id, doc.id);
-                            setPdfViewerUrl(signedData.url);
-                            setPdfViewerName(signedData.originalName || doc.filename);
+                            const response = await downloadShipmentDocument(id, doc.id);
+                            const blob = new Blob([response.data], { type: response.headers['content-type'] || 'application/pdf' });
+                            const blobUrl = window.URL.createObjectURL(blob);
+                            setPdfViewerUrl(blobUrl);
+                            setPdfViewerName(doc.originalName || doc.filename);
                           } catch (err) {
-                            setError('Failed to load document');
-                            console.error(err);
+                            // Fallback: token query param
+                            try {
+                              const token = localStorage.getItem('token');
+                              const baseUrl = process.env.REACT_APP_API_URL || '';
+                              setPdfViewerUrl(`${baseUrl}/shipments/${id}/documents/${doc.id}/download?token=${token}`);
+                              setPdfViewerName(doc.originalName || doc.filename);
+                            } catch {
+                              setError('Failed to load document');
+                            }
                           }
                         }}
                       >
@@ -653,12 +662,19 @@ function ShipmentDetailsPage() {
                         className="btn btn-sm btn-outline"
                         onClick={async () => {
                           try {
-                            // Get signed URL for download
-                            const signedData = await getDocumentSignedUrl(id, doc.id);
-                            window.open(signedData.url, '_blank');
+                            const response = await downloadShipmentDocument(id, doc.id);
+                            const blob = new Blob([response.data], { type: response.headers['content-type'] || 'application/pdf' });
+                            const blobUrl = window.URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = blobUrl;
+                            a.download = doc.originalName || doc.filename || 'document';
+                            a.click();
+                            setTimeout(() => window.URL.revokeObjectURL(blobUrl), 5000);
                           } catch (err) {
-                            setError('Failed to download document');
-                            console.error(err);
+                            // Fallback: token query param
+                            const token = localStorage.getItem('token');
+                            const baseUrl = process.env.REACT_APP_API_URL || '';
+                            window.open(`${baseUrl}/shipments/${id}/documents/${doc.id}/download?token=${token}`, '_blank');
                           }
                         }}
                       >

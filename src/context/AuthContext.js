@@ -27,9 +27,16 @@ export const AuthProvider = ({ children }) => {
     setLoading(false);
   };
 
-  const login = async (username, password) => {
-    const response = await apiLogin(username, password);
-    const { token, user } = response.data.data;
+  const login = async (username, password, totpCode) => {
+    const response = await apiLogin(username, password, totpCode);
+    const data = response.data.data;
+    
+    // If 2FA is required, return the response so LoginPage can handle it
+    if (data.requires2FA) {
+      return data;
+    }
+    
+    const { token, user } = data;
     localStorage.setItem('token', token);
     setUser(user);
     return user;

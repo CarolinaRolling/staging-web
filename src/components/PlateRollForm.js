@@ -3,6 +3,7 @@ import RollToOverride from './RollToOverride';
 import { Upload } from 'lucide-react';
 import { searchVendors, getSettings, createVendor } from '../services/api';
 import PitchSection, { getPitchDescriptionLines } from './PitchSection';
+import HeatNumberInput from './HeatNumberInput';
 
 const THICKNESS_OPTIONS = [
   '24 ga', '20 ga', '16 ga', '14 ga', '12 ga', '11 ga', '10 ga',
@@ -164,6 +165,23 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
     return { ringsPerLength, stockLengthsNeeded, totalRingsFromStock, waste, ringLength, stock, usedPerLength, wastePerLength };
   }, [nestingEnabled, isCompleteRing, calcResult, stockLength, partData.quantity]);
 
+  // Persist nesting results to formData for PO generator
+  useEffect(() => {
+    if (nestingCalc) {
+      setPartData(prev => ({ ...prev, 
+        _stockLengthsNeeded: nestingCalc.stockLengthsNeeded,
+        _ringsPerLength: nestingCalc.ringsPerLength,
+        _ringLength: nestingCalc.ringLength
+      }));
+    } else {
+      setPartData(prev => ({ ...prev, 
+        _stockLengthsNeeded: null,
+        _ringsPerLength: null,
+        _ringLength: null
+      }));
+    }
+  }, [nestingCalc]);
+
   // Build material description string — includes quantity
   const materialDescription = useMemo(() => {
     const descParts = [];
@@ -217,7 +235,8 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
     const lines = [];
     
     const spec = rollMeasurePoint === 'inside' ? (rollMeasureType === 'radius' ? 'ISR' : 'ID') : rollMeasurePoint === 'outside' ? (rollMeasureType === 'radius' ? 'OSR' : 'OD') : (rollMeasureType === 'radius' ? 'CLR' : 'CLD');
-    lines.push(`Roll to ${rv}" ${spec} EW`);
+    const ewHw = partData.rollType === 'easy_way' ? 'EW' : partData.rollType === 'hard_way' ? 'HW' : partData.rollType === 'on_edge' ? 'OE' : '';
+    lines.push(`Roll to ${rv}" ${spec}${ewHw ? ' ' + ewHw : ''}`);
     if (showAngle && angleValue) lines.push(`Arc: ${angleValue}°`);
     if (partData._protectivePaper && partData._protectivePaperSide) {
       const sideLabel = partData._protectivePaperSide === 'double' ? 'Double Sided' : partData._protectivePaperSide === 'inside' ? 'Inside' : 'Outside';
@@ -228,7 +247,7 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
     }
     lines.push(...getPitchDescriptionLines(partData, clDiameter));
     return lines.join('\n');
-  }, [rollToMethod, rollValue, rollMeasureType, rollMeasurePoint, clDiameter, showAngle, angleValue, partData._pitchEnabled, partData._pitchMethod, partData._pitchRun, partData._pitchRise, partData._pitchAngle, partData._pitchSpaceType, partData._pitchSpaceValue, partData._pitchDirection, partData._pitchDevelopedDia, partData._protectivePaper, partData._protectivePaperSide, nestingCalc]);
+  }, [rollToMethod, rollValue, rollMeasureType, rollMeasurePoint, partData.rollType, clDiameter, showAngle, angleValue, partData._pitchEnabled, partData._pitchMethod, partData._pitchRun, partData._pitchRise, partData._pitchAngle, partData._pitchSpaceType, partData._pitchSpaceValue, partData._pitchDirection, partData._pitchDevelopedDia, partData._protectivePaper, partData._protectivePaperSide, nestingCalc]);
 
   useEffect(() => {
     setPartData(prev => ({ ...prev, _rollingDescription: rollingDescription }));
@@ -607,23 +626,25 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
             <select className="form-select" value={partData.materialSource || 'customer_supplied'} onChange={(e) => setPartData({ ...partData, materialSource: e.target.value })}>
               <option value="customer_supplied">Client Supplies</option>
               <option value="we_order">We Order</option>
+              <option value="in_stock">In Stock (We Supply)</option>
             </select>
           </div>
         </div>
 
         {/* Vendor Selector */}
         {partData.materialSource === 'we_order' && (
+          <>
           <div className="form-group" style={{ position: 'relative', marginTop: 8 }}>
             <label className="form-label">Vendor</label>
             <input className="form-input"
-              value={partData._vendorSearch !== undefined ? partData._vendorSearch : (partData.vendor?.name || partData.supplierName || '')}
+              value={partData._vendorSearch !== undefined ? partData._vendorSearch : (partData.supplierName || partData.vendor?.name || '')}
               onChange={async (e) => {
                 const value = e.target.value;
                 setPartData({ ...partData, _vendorSearch: value });
                 if (value.length >= 1) {
                   try { const res = await searchVendors(value); setVendorSuggestions(res.data.data || []); setShowVendorSuggestions(true); } catch { setVendorSuggestions([]); }
                 } else {
-                  setPartData({ ...partData, _vendorSearch: value, vendorId: null, supplierName: '' }); setVendorSuggestions([]); setShowVendorSuggestions(false);
+                  setPartData({ ...partData, _vendorSearch: value, vendorId: null, supplierName: '', vendor: null }); setVendorSuggestions([]); setShowVendorSuggestions(false);
                 }
               }}
               onFocus={async () => { try { const res = await searchVendors(''); setVendorSuggestions(res.data.data || []); setShowVendorSuggestions(true); } catch {} }}
@@ -634,7 +655,7 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
               <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: 'white', border: '1px solid #ddd', borderRadius: 4, maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
                 {vendorSuggestions.map(v => (
                   <div key={v.id} style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #eee' }}
-                    onMouseDown={() => { setPartData({ ...partData, vendorId: v.id, supplierName: v.name, _vendorSearch: undefined }); setShowVendorSuggestions(false); }}>
+                    onMouseDown={() => { setPartData({ ...partData, vendorId: v.id, supplierName: v.name, vendor: null, _vendorSearch: undefined }); setShowVendorSuggestions(false); }}>
                     <strong>{v.name}</strong>
                     {v.contactPhone && <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: 8 }}>{v.contactPhone}</span>}
                   </div>
@@ -644,7 +665,7 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
                     onMouseDown={async () => {
                       try {
                         const resp = await createVendor({ name: partData._vendorSearch });
-                        if (resp.data.data) { setPartData({ ...partData, vendorId: resp.data.data.id, supplierName: resp.data.data.name, _vendorSearch: undefined }); showMessage(`Vendor "${resp.data.data.name}" created`); }
+                        if (resp.data.data) { setPartData({ ...partData, vendorId: resp.data.data.id, supplierName: resp.data.data.name, vendor: null, _vendorSearch: undefined }); showMessage(`Vendor "${resp.data.data.name}" created`); }
                       } catch { setError('Failed to create vendor'); }
                       setShowVendorSuggestions(false);
                     }}>
@@ -654,6 +675,14 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
               </div>
             )}
           </div>
+        
+          <div className="form-group" style={{ marginTop: 8 }}>
+            <label className="form-label">Vendor Estimate #</label>
+            <input className="form-input" value={partData.vendorEstimateNumber || ''}
+              onChange={(e) => setPartData({ ...partData, vendorEstimateNumber: e.target.value })}
+              placeholder="Optional - vendor's quote/estimate number" />
+          </div>
+          </>
         )}
 
         {/* Material Description for email */}
@@ -668,10 +697,52 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
       {/* === PRICING === */}
       <div style={sectionStyle}>
         {sectionTitle('💰', 'Pricing', '#1976d2')}
+
+        {/* Stock length pricing when nesting is active */}
+        {nestingCalc && (
+          <div style={{ background: '#e8f5e9', padding: 12, borderRadius: 8, marginBottom: 12, border: '1px solid #a5d6a7' }}>
+            <div style={{ fontWeight: 700, fontSize: '0.85rem', color: '#2e7d32', marginBottom: 8 }}>📦 Stock Length Pricing</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Cost per Full Length</label>
+                <input type="number" step="any" className="form-input" value={partData._stockLengthCost || ''} onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    const costPerLength = parseFloat(e.target.value) || 0;
+                    const perRing = nestingCalc.ringsPerLength > 0 ? Math.round(costPerLength / nestingCalc.ringsPerLength * 100) / 100 : 0;
+                    setPartData({ ...partData, _stockLengthCost: e.target.value, materialTotal: perRing.toFixed(2) });
+                  }} placeholder="0.00" />
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label"># Stock Lengths</label>
+                <input type="text" className="form-input" value={nestingCalc.stockLengthsNeeded} disabled style={{ background: '#f5f5f5', fontWeight: 700 }} />
+              </div>
+            </div>
+            {partData._stockLengthCost > 0 && (
+              <div style={{ marginTop: 8, padding: 8, background: '#fff', borderRadius: 6, fontSize: '0.85rem', color: '#333' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                  <span>Cost per full length ({nestingCalc.stock}" stock)</span>
+                  <span>${parseFloat(partData._stockLengthCost).toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                  <span>÷ {nestingCalc.ringsPerLength} rings per length</span>
+                  <span>= <strong>${(parseFloat(partData._stockLengthCost) / nestingCalc.ringsPerLength).toFixed(2)}/ring</strong></span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderTop: '1px solid #c8e6c9', marginTop: 4, fontWeight: 600, color: '#2e7d32' }}>
+                  <span>Total material ({nestingCalc.stockLengthsNeeded} lengths × ${parseFloat(partData._stockLengthCost).toFixed(2)})</span>
+                  <span>${(nestingCalc.stockLengthsNeeded * parseFloat(partData._stockLengthCost)).toFixed(2)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 2fr', gap: 12 }}>
           <div className="form-group">
-            <label className="form-label">Material Cost (each)</label>
-            <input type="number" step="any" className="form-input" value={partData.materialTotal || ''} onFocus={(e) => e.target.select()} onChange={(e) => setPartData({ ...partData, materialTotal: e.target.value })} placeholder="0.00" />
+            <label className="form-label">Material Cost (each){nestingCalc ? ' — per ring' : ''}</label>
+            <input type="number" step="any" className="form-input" value={partData.materialTotal || ''} onFocus={(e) => e.target.select()} onChange={(e) => setPartData({ ...partData, materialTotal: e.target.value, _stockLengthCost: '' })} placeholder="0.00" />
+            {nestingCalc && partData._stockLengthCost > 0 && (
+              <div style={{ fontSize: '0.7rem', color: '#2e7d32', marginTop: 2 }}>Auto-calculated from stock length cost</div>
+            )}
           </div>
           <div className="form-group">
             <label className="form-label">Markup %</label>
@@ -731,10 +802,7 @@ export default function PlateRollForm({ partData, setPartData, vendorSuggestions
             <label className="form-label">Client Part Number</label>
             <input type="text" className="form-input" value={partData.clientPartNumber || ''} onChange={(e) => setPartData({ ...partData, clientPartNumber: e.target.value })} placeholder="Optional" />
           </div>
-          <div className="form-group">
-            <label className="form-label">Heat Number</label>
-            <input type="text" className="form-input" value={partData.heatNumber || ''} onChange={(e) => setPartData({ ...partData, heatNumber: e.target.value })} placeholder="Optional" />
-          </div>
+          <HeatNumberInput partData={partData} setPartData={setPartData} />
         </div>
       </div>
     </>

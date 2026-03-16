@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
@@ -24,6 +24,7 @@ import EmailSettingsPage from './pages/EmailSettingsPage';
 import ClientsVendorsPage from './pages/ClientsVendorsPage';
 import AutoCADToolsPage from './pages/AutoCADToolsPage';
 import ShipmentsAdminPage from './pages/ShipmentsAdminPage';
+import ShopSuppliesPage from './pages/ShopSuppliesPage';
 import SectionSizesPage from './pages/SectionSizesPage';
 import './App.css';
 
@@ -138,27 +139,21 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
       
-      <Route path="/backup" element={
+      <Route path="/clients-vendors" element={
         <ProtectedRoute>
-          <Layout><BackupPage /></Layout>
+          <Layout><ClientsVendorsPage /></Layout>
         </ProtectedRoute>
       } />
       
-      <Route path="/settings" element={
+      <Route path="/shop-supplies" element={
         <ProtectedRoute>
-          <Layout><SettingsPage /></Layout>
+          <Layout><ShopSuppliesPage /></Layout>
         </ProtectedRoute>
       } />
       
-      <Route path="/settings/locations" element={
+      <Route path="/admin/clients-vendors" element={
         <ProtectedRoute>
-          <Layout><LocationSettingsPage /></Layout>
-        </ProtectedRoute>
-      } />
-
-      <Route path="/settings/section-sizes" element={
-        <ProtectedRoute>
-          <Layout><SectionSizesPage /></Layout>
+          <Layout><ClientsVendorsPage /></Layout>
         </ProtectedRoute>
       } />
       
@@ -170,7 +165,19 @@ function AppRoutes() {
       
       <Route path="/admin" element={
         <AdminRoute>
-          <Layout><AdminPage /></Layout>
+          <Layout><AdminPage section="users-logs" /></Layout>
+        </AdminRoute>
+      } />
+      
+      <Route path="/admin/users-logs" element={
+        <AdminRoute>
+          <Layout><AdminPage section="users-logs" /></Layout>
+        </AdminRoute>
+      } />
+      
+      <Route path="/admin/shop-config" element={
+        <AdminRoute>
+          <Layout><AdminPage section="shop-config" /></Layout>
         </AdminRoute>
       } />
       
@@ -192,17 +199,41 @@ function AppRoutes() {
         </AdminRoute>
       } />
       
-      <Route path="/admin/clients-vendors" element={
-        <AdminRoute>
-          <Layout><ClientsVendorsPage /></Layout>
-        </AdminRoute>
-      } />
-      
       <Route path="/admin/autocad-tools" element={
         <AdminRoute>
           <Layout><AutoCADToolsPage /></Layout>
         </AdminRoute>
       } />
+      
+      <Route path="/admin/settings" element={
+        <AdminRoute>
+          <Layout><SettingsPage /></Layout>
+        </AdminRoute>
+      } />
+      
+      <Route path="/admin/settings/locations" element={
+        <AdminRoute>
+          <Layout><LocationSettingsPage /></Layout>
+        </AdminRoute>
+      } />
+      
+      <Route path="/admin/settings/section-sizes" element={
+        <AdminRoute>
+          <Layout><SectionSizesPage /></Layout>
+        </AdminRoute>
+      } />
+      
+      <Route path="/admin/backup" element={
+        <AdminRoute>
+          <Layout><BackupPage /></Layout>
+        </AdminRoute>
+      } />
+      
+      {/* Legacy routes - redirect */}
+      <Route path="/settings" element={<Navigate to="/admin/settings" replace />} />
+      <Route path="/settings/locations" element={<Navigate to="/admin/settings/locations" replace />} />
+      <Route path="/settings/section-sizes" element={<Navigate to="/admin/settings/section-sizes" replace />} />
+      <Route path="/backup" element={<Navigate to="/admin/backup" replace />} />
       
       <Route path="/admin/shipments" element={
         <ProtectedRoute>
@@ -227,6 +258,17 @@ function AppRoutes() {
 }
 
 function App() {
+  // Prevent scroll wheel from changing number input values globally
+  useEffect(() => {
+    const handleWheel = (e) => {
+      if (e.target && e.target.type === 'number') {
+        e.target.blur();
+      }
+    };
+    document.addEventListener('wheel', handleWheel, { passive: true });
+    return () => document.removeEventListener('wheel', handleWheel);
+  }, []);
+
   return (
     <AuthProvider>
       <Router>

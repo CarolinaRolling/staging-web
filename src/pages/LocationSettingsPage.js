@@ -141,7 +141,7 @@ function LocationSettingsPage() {
     <div>
       <div className="page-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <button className="btn btn-icon btn-secondary" onClick={() => navigate('/settings')}>
+          <button className="btn btn-icon btn-secondary" onClick={() => navigate('/admin/settings')}>
             <ArrowLeft size={20} />
           </button>
           <h1 className="page-title">Location Settings</h1>

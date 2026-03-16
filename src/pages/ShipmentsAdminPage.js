@@ -16,7 +16,7 @@ function ShipmentsAdminPage() {
   const [shipments, setShipments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('active');
   const [selected, setSelected] = useState(new Set());
   const [editingId, setEditingId] = useState(null);
   const [editData, setEditData] = useState({});
@@ -34,9 +34,14 @@ function ShipmentsAdminPage() {
       setLoading(true);
       const params = { limit: 500 };
       if (search) params.search = search;
-      if (statusFilter !== 'all') params.status = statusFilter;
+      if (statusFilter && statusFilter !== 'all' && statusFilter !== 'active') params.status = statusFilter;
       const res = await getShipments(params);
-      setShipments(res.data.data || []);
+      let data = res.data.data || [];
+      // Active = exclude shipped and archived
+      if (statusFilter === 'active') {
+        data = data.filter(s => s.status !== 'shipped' && s.status !== 'archived');
+      }
+      setShipments(data);
     } catch (err) {
       console.error('Failed to load shipments:', err);
     } finally {
@@ -111,15 +116,8 @@ function ShipmentsAdminPage() {
     }
   };
 
-  const handleCreateWorkOrder = async (shipmentId) => {
-    try {
-      const res = await linkShipmentToWorkOrder(shipmentId);
-      const wo = res.data.data.workOrder;
-      showMessage(`Linked to DR-${wo.drNumber}`);
-      loadShipments();
-    } catch (err) {
-      console.error(err);
-    }
+  const handleCreateWorkOrder = (shipmentId) => {
+    navigate(`/workorders?newFromShipment=${shipmentId}`);
   };
 
   const openLinkModal = (shipmentId) => {
@@ -187,7 +185,7 @@ function ShipmentsAdminPage() {
     return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const unlinkedCount = shipments.filter(s => !s.workOrderId && s.status !== 'archived').length;
+  const unlinkedCount = shipments.filter(s => !s.workOrderId && s.status !== 'archived' && s.status !== 'shipped').length;
 
   return (
     <div>
@@ -238,6 +236,7 @@ function ShipmentsAdminPage() {
             onChange={(e) => setStatusFilter(e.target.value)}
             style={{ width: 'auto' }}
           >
+            <option value="active">Active</option>
             <option value="all">All Statuses</option>
             <option value="received">Received</option>
             <option value="processing">Processing</option>
@@ -422,7 +421,7 @@ function ShipmentsAdminPage() {
                         <span style={{ color: '#1976d2', fontSize: '0.8rem' }}>
                           <Link size={12} /> Linked
                         </span>
-                      ) : s.status !== 'archived' ? (
+                      ) : s.status !== 'archived' && s.status !== 'shipped' ? (
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button 
                             className="btn btn-primary"
@@ -459,7 +458,7 @@ function ShipmentsAdminPage() {
                           <button onClick={() => startEdit(s)} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1976d2' }}>
                             <Edit2 size={14} />
                           </button>
-                          {s.status !== 'archived' && (
+                          {s.status !== 'archived' && s.status !== 'shipped' && (
                             <button onClick={() => handleArchive(s.id)} title="Archive" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#f57c00' }}>
                               <Archive size={14} />
                             </button>

@@ -156,7 +156,7 @@ function BackupPage() {
                 <Package size={18} />
                 <div>
                   <strong>Shipments & Inventory</strong>
-                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.shipments || 0} records</div>
+                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.counts?.shipments || 0} records</div>
                 </div>
               </label>
 
@@ -166,7 +166,7 @@ function BackupPage() {
                 <ClipboardList size={18} />
                 <div>
                   <strong>Work Orders</strong>
-                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.workOrders || 0} records</div>
+                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.counts?.workOrders || 0} records</div>
                 </div>
               </label>
 
@@ -176,7 +176,7 @@ function BackupPage() {
                 <DollarSign size={18} />
                 <div>
                   <strong>Estimates</strong>
-                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.estimates || 0} records</div>
+                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.counts?.estimates || 0} records</div>
                 </div>
               </label>
 
@@ -186,7 +186,7 @@ function BackupPage() {
                 <FileText size={18} />
                 <div>
                   <strong>Inbound Orders</strong>
-                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.inboundOrders || 0} records</div>
+                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.counts?.inboundOrders || 0} records</div>
                 </div>
               </label>
 
@@ -196,7 +196,7 @@ function BackupPage() {
                 <Settings size={18} />
                 <div>
                   <strong>Settings & Users</strong>
-                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.settings || 0} settings, {backupInfo?.users || 0} users</div>
+                  <div style={{ fontSize: '0.8rem', color: '#666' }}>{backupInfo?.counts?.settings || 0} settings, {backupInfo?.counts?.users || 0} users</div>
                 </div>
               </label>
             </div>
@@ -296,22 +296,22 @@ function BackupPage() {
         <div className="grid grid-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
           <div style={{ textAlign: 'center', padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
             <Package size={32} color="#1976d2" />
-            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.shipments || 0}</div>
+            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.counts?.shipments || 0}</div>
             <div style={{ color: '#666' }}>Shipments</div>
           </div>
           <div style={{ textAlign: 'center', padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
             <ClipboardList size={32} color="#388e3c" />
-            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.workOrders || 0}</div>
+            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.counts?.workOrders || 0}</div>
             <div style={{ color: '#666' }}>Work Orders</div>
           </div>
           <div style={{ textAlign: 'center', padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
             <DollarSign size={32} color="#f57c00" />
-            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.estimates || 0}</div>
+            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.counts?.estimates || 0}</div>
             <div style={{ color: '#666' }}>Estimates</div>
           </div>
           <div style={{ textAlign: 'center', padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
             <FileText size={32} color="#7b1fa2" />
-            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.inboundOrders || 0}</div>
+            <div style={{ fontSize: '2rem', fontWeight: 600, marginTop: 8 }}>{backupInfo?.counts?.inboundOrders || 0}</div>
             <div style={{ color: '#666' }}>Inbound Orders</div>
           </div>
         </div>

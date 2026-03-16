@@ -7,7 +7,8 @@ import {
   uploadEstimateFiles, getEstimateFileSignedUrl, deleteEstimateFile,
   downloadEstimatePDF, convertEstimateToWorkOrder,
   uploadEstimatePartFile, deleteEstimatePartFile, viewEstimatePartFile,
-  searchClients, searchVendors, getSettings, resetEstimateConversion
+  searchClients, searchVendors, getSettings, resetEstimateConversion,
+  getNextDRNumber
 } from '../services/api';
 import PlateRollForm from '../components/PlateRollForm';
 import AngleRollForm from '../components/AngleRollForm';
@@ -23,13 +24,13 @@ import ConeRollForm from '../components/ConeRollForm';
 import TeeBarRollForm from '../components/TeeBarRollForm';
 import PressBrakeForm from '../components/PressBrakeForm';
 import RushServiceForm from '../components/RushServiceForm';
-import ImportPartsModal from '../components/ImportPartsModal';
+import HeatNumberInput from '../components/HeatNumberInput';
 
 const PART_TYPES = {
   plate_roll: { label: 'Plate Roll', icon: '🔩', desc: 'Flat plate rolling with arc calculator' },
   cone_roll: { label: 'Cone Layout', icon: '🔺', desc: 'Cone segment design with AutoCAD export' },
   angle_roll: { label: 'Angle Roll', icon: '📐', desc: 'Angle iron rolling' },
-  flat_bar: { label: 'Flat Bar', icon: '▬', desc: 'Flat bar bending' },
+  flat_bar: { label: 'Flat & Square Bar', icon: '▬', desc: 'Flat bar and square bar bending' },
   pipe_roll: { label: 'Pipes/Tubes/Round', icon: '🔧', desc: 'Pipe, tube, and solid round bar bending' },
   tube_roll: { label: 'Square & Rect Tubing', icon: '⬜', desc: 'Square and rectangular tube rolling' },
   channel_roll: { label: 'Channel', icon: '🔲', desc: 'C-channel rolling' },
@@ -63,7 +64,9 @@ function EstimateDetailsPage() {
   const [error, setError] = useState(null);
   const [partFormError, setPartFormError] = useState(null);
   const [success, setSuccess] = useState(null);
-  const [downloadingPDF, setDownloadingPDF] = useState(false);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState(null);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const pdfPreviewActive = useRef(false);
 
   const [formData, setFormData] = useState({
     clientName: '', contactName: '', contactEmail: '', contactPhone: '',
@@ -88,11 +91,15 @@ function EstimateDetailsPage() {
   // Convert to Work Order state
   const [showConvertModal, setShowConvertModal] = useState(false);
   const [converting, setConverting] = useState(false);
+  const [nextDR, setNextDR] = useState(null);
+  const [useCustomDR, setUseCustomDR] = useState(false);
+  const [customDR, setCustomDR] = useState('');
   const [convertData, setConvertData] = useState({
     clientPurchaseOrderNumber: '',
     requestedDueDate: '',
     promisedDate: '',
-    notes: ''
+    notes: '',
+    materialReceived: false
   });
   
   // Part file upload state
@@ -102,9 +109,6 @@ function EstimateDetailsPage() {
   // Estimate number editing state
   const [editingEstNum, setEditingEstNum] = useState(false);
   const [estNumInput, setEstNumInput] = useState('');
-  
-  // Import parts modal state
-  const [showImportModal, setShowImportModal] = useState(false);
   
   // Client autofill state
   const [clientSuggestions, setClientSuggestions] = useState([]);
@@ -126,6 +130,11 @@ function EstimateDetailsPage() {
     loadDefaultSettings();
     if (!isNew) loadEstimate(); 
   }, [id]);
+
+  // Cleanup PDF blob URL on unmount
+  useEffect(() => {
+    return () => { if (pdfPreviewUrl && pdfPreviewUrl.startsWith('blob:')) window.URL.revokeObjectURL(pdfPreviewUrl); };
+  }, [pdfPreviewUrl]);
 
   const loadDefaultSettings = async () => {
     try {
@@ -161,9 +170,14 @@ function EstimateDetailsPage() {
     }
   };
 
+  const initialLoadDone = useRef(false);
+
   const loadEstimate = async () => {
+    const scrollY = window.scrollY;
+    const isReload = initialLoadDone.current;
+    
     try {
-      setLoading(true);
+      if (!isReload) setLoading(true);
       const response = await getEstimateById(id);
       const data = response.data.data;
       setEstimate(data);
@@ -199,12 +213,16 @@ function EstimateDetailsPage() {
             const clientIsExempt = client.taxStatus === 'resale' || client.taxStatus === 'exempt' ||
               (client.resaleCertificate && client.permitStatus === 'active');
             if (clientIsExempt) {
-              setFormData(prev => ({
-                ...prev,
+              const exemptData = {
                 taxExempt: true,
                 taxExemptReason: (client.taxStatus === 'exempt') ? 'Tax Exempt' : 'Resale',
                 taxExemptCertNumber: client.resaleCertificate || ''
-              }));
+              };
+              setFormData(prev => ({ ...prev, ...exemptData }));
+              // Persist to DB immediately so totals are recalculated without tax
+              if (!isNew) {
+                try { await updateEstimate(id, exemptData); } catch (e) { /* ignore */ }
+              }
             }
           }
         } catch (e) { /* ignore */ }
@@ -213,6 +231,10 @@ function EstimateDetailsPage() {
       setError('Failed to load estimate');
     } finally {
       setLoading(false);
+      initialLoadDone.current = true;
+      if (isReload) {
+        requestAnimationFrame(() => window.scrollTo(0, scrollY));
+      }
     }
   };
 
@@ -335,15 +357,9 @@ function EstimateDetailsPage() {
 
     let bestSpecificRule = null;
     let bestGeneralRule = null;
-    let bestFallbackRule = null;  // Any rule for this part type, regardless of constraints
 
     for (const rule of laborMinimums) {
       if (rule.partType !== part.partType) continue;
-
-      // Track the highest minimum for this part type as absolute fallback
-      if (!bestFallbackRule || parseFloat(rule.minimum) > parseFloat(bestFallbackRule.minimum)) {
-        bestFallbackRule = rule;
-      }
 
       const hasMinSize = rule.minSize !== undefined && rule.minSize !== null && rule.minSize !== '' && parseFloat(rule.minSize) > 0;
       const hasMaxSize = rule.maxSize !== undefined && rule.maxSize !== null && rule.maxSize !== '' && parseFloat(rule.maxSize) > 0;
@@ -387,8 +403,9 @@ function EstimateDetailsPage() {
       }
     }
 
-    // Priority: specific match > general match > fallback (any rule for this part type)
-    return bestSpecificRule || bestGeneralRule || bestFallbackRule;
+    // Only return a specific match or a general (no-constraints) match
+    // Never fall back to a constrained rule that didn't match
+    return bestSpecificRule || bestGeneralRule || null;
   };
 
   // Estimate-level minimum check:
@@ -501,9 +518,108 @@ function EstimateDetailsPage() {
     return { partsSubtotal, discountAmt, afterDiscount, trucking, taxAmount, grandTotal, ccInPersonFee, ccInPersonTotal, ccManualFee, ccManualTotal, minInfo, expediteAmount, expediteLabel, emergencyAmount, emergencyLabel };
   };
 
-  const handleDownloadPDF = async () => {
+  const generatePdfPreview = async () => {
     try {
-      setDownloadingPDF(true);
+      setPdfGenerating(true);
+      // Save current state first so PDF reflects on-screen values
+      try {
+        await updateEstimate(id, { 
+          taxExempt: formData.taxExempt, 
+          taxExemptReason: formData.taxExemptReason,
+          taxExemptCertNumber: formData.taxExemptCertNumber,
+          taxRate: formData.taxRate,
+          truckingCost: formData.truckingCost,
+          truckingDescription: formData.truckingDescription,
+          discountPercent: formData.discountPercent,
+          discountAmount: formData.discountAmount,
+          discountReason: formData.discountReason,
+          minimumOverride: formData.minimumOverride,
+          minimumOverrideReason: formData.minimumOverrideReason
+        });
+      } catch (saveErr) {
+        console.warn('Auto-save before PDF failed:', saveErr);
+      }
+      const response = await downloadEstimatePDF(id);
+      const blob = new Blob([response.data], { type: 'application/pdf' });
+      
+      // Revoke old blob URL
+      if (pdfPreviewUrl) window.URL.revokeObjectURL(pdfPreviewUrl);
+      const url = window.URL.createObjectURL(blob);
+      setPdfPreviewUrl(url);
+      pdfPreviewActive.current = true;
+
+      // Save a copy as an estimate file (fire-and-forget)
+      try {
+        const oldPdf = files.find(f => (f.originalName || f.filename || '').startsWith('Generated-Estimate-'));
+        if (oldPdf) { try { await deleteEstimateFile(id, oldPdf.id); } catch {} }
+        const pdfFileName = `Generated-Estimate-${estimate?.estimateNumber || id}.pdf`;
+        const pdfFile = new File([blob], pdfFileName, { type: 'application/pdf' });
+        await uploadEstimateFiles(id, [pdfFile]);
+        await loadEstimate();
+      } catch (storeErr) {
+        console.warn('Storing PDF copy failed:', storeErr);
+      }
+
+      showMessage('PDF generated');
+    } catch (err) {
+      setError('Failed to generate PDF');
+      console.error(err);
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
+  const handleDownloadFromPreview = async () => {
+    try {
+      const response = await downloadEstimatePDF(id);
+      const blob = new Blob([response.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Estimate-${estimate?.estimateNumber || id}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      showMessage('PDF downloaded');
+    } catch {
+      if (pdfPreviewUrl) window.open(pdfPreviewUrl, '_blank');
+    }
+  };
+
+  const closePdfPreview = () => {
+    if (pdfPreviewUrl) window.URL.revokeObjectURL(pdfPreviewUrl);
+    setPdfPreviewUrl(null);
+    pdfPreviewActive.current = false;
+  };
+
+  // Auto-regenerate PDF preview when it's open
+  const regeneratePdfIfActive = async () => {
+    if (pdfPreviewActive.current) {
+      await generatePdfPreview();
+    }
+  };
+
+  // View stored PDF preview
+  const viewStoredPdf = async () => {
+    try {
+      setPdfGenerating(true);
+      const response = await downloadEstimatePDF(id);
+      const blob = new Blob([response.data], { type: 'application/pdf' });
+      if (pdfPreviewUrl) window.URL.revokeObjectURL(pdfPreviewUrl);
+      const url = window.URL.createObjectURL(blob);
+      setPdfPreviewUrl(url);
+      pdfPreviewActive.current = true;
+    } catch (err) {
+      setError('Failed to load PDF preview');
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
+  // Download stored PDF
+  const downloadStoredPdf = async () => {
+    try {
       const response = await downloadEstimatePDF(id);
       const blob = new Blob([response.data], { type: 'application/pdf' });
       const url = window.URL.createObjectURL(blob);
@@ -517,9 +633,6 @@ function EstimateDetailsPage() {
       showMessage('PDF downloaded');
     } catch (err) {
       setError('Failed to download PDF');
-      console.error(err);
-    } finally {
-      setDownloadingPDF(false);
     }
   };
 
@@ -534,6 +647,7 @@ function EstimateDetailsPage() {
       } else {
         await updateEstimate(id, payload);
         await loadEstimate();
+        regeneratePdfIfActive();
       }
       showMessage(sendToClient ? 'Estimate sent' : 'Estimate saved');
     } catch (err) { setError('Failed to save'); }
@@ -551,6 +665,7 @@ function EstimateDetailsPage() {
       setEditingEstNum(false);
       showMessage(`Estimate number changed to ${newNum}`);
       await loadEstimate();
+      regeneratePdfIfActive();
     } catch (err) {
       setError(err.response?.data?.error?.message || 'Failed to update estimate number');
     }
@@ -567,7 +682,7 @@ function EstimateDetailsPage() {
       partType: type, clientPartNumber: '', heatNumber: '', cutFileReference: '', quantity: 1,
       // Material - controlled by weSupplyMaterial checkbox
       weSupplyMaterial: false,
-      materialDescription: '', supplierName: '', materialUnitCost: '', 
+      materialDescription: '', supplierName: '', vendorEstimateNumber: '', materialUnitCost: '', 
       materialMarkupPercent: defaultSettings.defaultMaterialMarkup || 20,
       // Rolling cost
       rollingCost: '',
@@ -591,13 +706,19 @@ function EstimateDetailsPage() {
       _lengthOption: '', _customLength: ''
     });
     setPartFormError(null);
+    setVendorSuggestions([]);
+    setShowVendorSuggestions(false);
     setShowPartModal(true);
   };
 
   const openEditPartModal = (part) => {
     setEditingPart(part);
+    // Clear vendor search state from previous part edit
+    setVendorSuggestions([]);
+    setShowVendorSuggestions(false);
     const editData = {
       ...part,
+      _vendorSearch: undefined, // ensure clean vendor search state
       weSupplyMaterial: part.weSupplyMaterial || false,
       materialUnitCost: part.materialUnitCost || '',
       materialMarkupPercent: part.materialMarkupPercent ?? defaultSettings.defaultMaterialMarkup ?? 20,
@@ -708,9 +829,9 @@ function EstimateDetailsPage() {
     }
 
     if (partData.partType === 'flat_bar') {
-      if (!partData._barSize) warnings.push('Flat bar size is required');
-      if (partData._barSize === 'Custom' && !partData._customBarSize) warnings.push('Custom flat bar size is required');
-      if (!partData.rollType) warnings.push('Roll Direction (Easy Way / Hard Way) is required');
+      if (!partData._barSize && !partData._barShape) warnings.push('Bar size is required');
+      if (partData._barSize === 'Custom' && !partData._customBarSize) warnings.push('Custom bar size is required');
+      if (partData._barShape !== 'square' && !partData.rollType) warnings.push('Roll Direction (Easy Way / Hard Way) is required');
       if (!partData._rollToMethod && !partData._rollValue && !partData.radius && !partData.diameter) warnings.push('Roll value (radius or diameter) is required');
     }
 
@@ -762,9 +883,8 @@ function EstimateDetailsPage() {
     }
 
     if (partData.partType === 'rush_service') {
-      if (!partData._expediteEnabled && !partData._emergencyEnabled) warnings.push('Select at least Expedite or Emergency Service');
       if (partData._expediteEnabled && partData._expediteType === 'custom_pct' && !partData._expediteCustomPct) warnings.push('Custom percentage is required');
-      if (partData._expediteEnabled && partData._expediteType === 'custom_amt' && !partData._expediteCustomAmt) warnings.push('Custom amount is required');
+      if (partData._expediteEnabled && partData._expediteType === 'custom_amt' && !partData._expediteCustomAmt && partData._expediteCustomAmt !== '0') warnings.push('Custom amount is required');
     }
     
     // Generic validations for all types
@@ -786,10 +906,12 @@ function EstimateDetailsPage() {
       
       // Ensure materialSource has a valid value before sending
       const dataToSend = { ...partData };
+      // Remove UI-only fields that shouldn't be saved to database
+      delete dataToSend._vendorSearch;
       // Capture the shape file before cleaning dataToSend
       const pendingShapeFile = dataToSend._shapeFile;
       delete dataToSend._shapeFile; // File objects can't be serialized to JSON
-      if (!dataToSend.materialSource || !['we_order', 'customer_supplied'].includes(dataToSend.materialSource)) {
+      if (!dataToSend.materialSource || !['we_order', 'customer_supplied', 'in_stock'].includes(dataToSend.materialSource)) {
         dataToSend.materialSource = 'customer_supplied';
       }
       // Sanitize ENUM fields — empty strings break Postgres ENUMs, must be null
@@ -828,6 +950,7 @@ function EstimateDetailsPage() {
       }
       
       await loadEstimate();
+      regeneratePdfIfActive();
       
       if (addAnother && !editingPart) {
         // Reset form and go back to part type picker
@@ -835,6 +958,8 @@ function EstimateDetailsPage() {
         setEditingPart(null);
         setPartData({});
         setPartFormError(null);
+        setVendorSuggestions([]);
+        setShowVendorSuggestions(false);
         showMessage('Part added — select next part type');
         setShowPartTypePicker(true);
       } else {
@@ -842,6 +967,8 @@ function EstimateDetailsPage() {
         setEditingPart(null);
         setPartData({});
         setPartFormError(null);
+        setVendorSuggestions([]);
+        setShowVendorSuggestions(false);
         showMessage(editingPart ? 'Part updated' : 'Part added');
       }
     } catch (err) { 
@@ -856,31 +983,9 @@ function EstimateDetailsPage() {
     try {
       await deleteEstimatePart(id, partId);
       await loadEstimate();
+      regeneratePdfIfActive();
       showMessage('Part deleted');
     } catch (err) { setError('Failed to delete part'); }
-  };
-
-  const handleImportParts = async (partDataList, onProgress) => {
-    let imported = 0;
-    for (const partData of partDataList) {
-      try {
-        // Ensure materialSource has a valid value
-        if (!partData.materialSource || !['we_order', 'customer_supplied'].includes(partData.materialSource)) {
-          partData.materialSource = 'customer_supplied';
-        }
-        // Sanitize ENUM fields
-        if (!partData.rollType) partData.rollType = null;
-        
-        await addEstimatePart(id, partData);
-        imported++;
-        if (onProgress) onProgress(imported);
-      } catch (err) {
-        console.error(`Failed to import part ${imported + 1}:`, err);
-        throw new Error(`Failed on part ${imported + 1}: ${err.response?.data?.error?.message || err.message}`);
-      }
-    }
-    await loadEstimate();
-    showMessage(`${imported} part${imported !== 1 ? 's' : ''} imported successfully`);
   };
 
   const handleFileUpload = async (uploadedFiles) => {
@@ -958,8 +1063,12 @@ function EstimateDetailsPage() {
       clientPurchaseOrderNumber: '',
       requestedDueDate: '',
       promisedDate: '',
-      notes: formData.notes
+      notes: formData.notes,
+      materialReceived: false
     });
+    setUseCustomDR(false);
+    setCustomDR('');
+    try { const res = await getNextDRNumber(); setNextDR(res.data.data.nextNumber); } catch { setNextDR(null); }
     
     setShowConvertModal(true);
   };
@@ -967,7 +1076,11 @@ function EstimateDetailsPage() {
   const handleConvertToWorkOrder = async () => {
     try {
       setConverting(true);
-      const response = await convertEstimateToWorkOrder(id, convertData);
+      const payload = {
+        ...convertData,
+        customDRNumber: useCustomDR && customDR ? parseInt(customDR) : null
+      };
+      const response = await convertEstimateToWorkOrder(id, payload);
       const workOrder = response.data.data.workOrder;
       setShowConvertModal(false);
       
@@ -1010,87 +1123,219 @@ function EstimateDetailsPage() {
       const linkedParent = isLinkedService ? parts.find(p => String(p.id) === String(part._linkedPartId || (part.formData || {})._linkedPartId)) : null;
       const calc = calculatePartTotal(part);
       const isEaPricing = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(part.partType);
-      const pricingHtml = isEaPricing
-        ? `<table style="width:100%;margin-top:8px;">
-            ${calc.materialEach > 0 ? `<tr><td>Material:</td><td style="text-align:right;">${formatCurrency(calc.materialEach)}</td></tr>` : ''}
-            <tr><td>${part.partType === 'fab_service' ? 'Service' : part.partType === 'shop_rate' ? 'Shop Rate' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}:</td><td style="text-align:right;">${formatCurrency(calc.laborEach)}</td></tr>
-            <tr style="border-top:1px solid #ddd;"><td><strong>Unit Price:</strong></td><td style="text-align:right;"><strong>${formatCurrency(calc.unitPrice)}</strong></td></tr>
-            <tr style="font-weight:bold;border-top:1px solid #ddd;"><td>Line Total (${part.quantity} × ${formatCurrency(calc.unitPrice)}):</td><td style="text-align:right;">${formatCurrency(calc.partTotal)}</td></tr></table>`
-        : `<table style="width:100%;margin-top:8px;"><tr><td>Material:</td><td style="text-align:right;">${formatCurrency(calc.materialTotal)}</td></tr>
-            <tr><td>Rolling:</td><td style="text-align:right;">${formatCurrency(part.rollingCost)}</td></tr>
-            <tr><td>Other Services:</td><td style="text-align:right;">${formatCurrency(calc.otherTotal)}</td></tr>
-            <tr style="font-weight:bold;border-top:1px solid #ddd;"><td>Part Total:</td><td style="text-align:right;">${formatCurrency(calc.partTotal)}</td></tr></table>`;
-      return `<div style="border:1px solid ${isLinkedService ? '#ce93d8' : '#ddd'};border-radius:${isLinkedService ? '4' : '8'}px;padding:${isLinkedService ? '12' : '16'}px;margin-bottom:${isLinkedService ? '4' : '12'}px;margin-left:${isLinkedService ? '32' : '0'}px;background:${isLinkedService ? '#fce4ec' : 'white'};">
-        <h4 style="margin:0 0 8px;color:${isLinkedService ? '#7b1fa2' : '#1976d2'};">${isLinkedService ? '↳ ' : ''}Part #${part.partNumber} - ${PART_TYPES[part.partType]?.label || part.partType}${isLinkedService && linkedParent ? ` <span style="font-weight:400;font-size:0.85em;color:#9c27b0;">for Part #${linkedParent.partNumber}</span>` : ''}</h4>
-        <p style="margin:0 0 4px;color:#666;">${part.clientPartNumber ? `Client Part#: ${part.clientPartNumber}` : ''} ${part.heatNumber ? `Heat#: ${part.heatNumber}` : ''} ${part.cutFileReference ? `<span style="color:#1565c0">Cut File: ${part.cutFileReference}</span>` : ''}</p>
-        <p style="margin:0 0 4px;"><strong>Qty:</strong> ${part.quantity}${part.sectionSize ? ` | <strong>Size:</strong> ${part.partType === 'pipe_roll' && part._schedule ? part.sectionSize.replace(' Pipe', ` Sch ${part._schedule} Pipe`) : part.sectionSize}` : ''}${part.thickness ? ` | <strong>Thk:</strong> ${part.thickness}` : ''}${part.outerDiameter ? ` | <strong>OD:</strong> ${part.outerDiameter}"` : ''}${part.wallThickness && part.wallThickness !== 'SOLID' ? ` | <strong>Wall:</strong> ${part.wallThickness}` : ''}${part.length ? ` | <strong>Length:</strong> ${part.length}` : ''}${part.material ? ` | <strong>Grade:</strong> ${part.material}` : ''}</p>
-        ${part.partType === 'cone_roll' ? (() => {
-          const thk = part.thickness || '';
-          const ldType = (part._coneLargeDiaType || 'inside') === 'inside' ? 'ID' : (part._coneLargeDiaType === 'outside' ? 'OD' : 'CLD');
-          const sdType = (part._coneSmallDiaType || 'inside') === 'inside' ? 'ID' : (part._coneSmallDiaType === 'outside' ? 'OD' : 'CLD');
-          const ld = parseFloat(part._coneLargeDia) || 0;
-          const sd = parseFloat(part._coneSmallDia) || 0;
-          const vh = parseFloat(part._coneHeight) || 0;
-          const grade = part.material || '';
-          const origin = part._materialOrigin || '';
-          let c = thk ? thk + ' ' : '';
-          c += 'Cone - ';
-          if (ld && sd && vh) c += ld.toFixed(1) + '" ' + ldType + ' x ' + sd.toFixed(1) + '" ' + sdType + ' x ' + vh.toFixed(1) + '" VH';
-          if (grade) c += ' ' + grade;
-          if (origin) c += ' ' + origin;
-          return `<p style="margin:0 0 4px;font-size:0.9em;color:#555;">📦 ${part.quantity}pc: ${c}</p>`;
-        })() : (part.materialDescription ? `<p style="margin:0 0 4px;font-size:0.9em;color:#555;">📦 ${part.materialDescription}</p>` : '')}
-        ${part._rollToMethod === 'template' ? `<p style="margin:0 0 4px;color:#e65100;font-size:0.9em;font-weight:bold;">📐 Roll Per Template / Sample${part.rollType ? ' (' + (part.partType === 'tee_bar' ? (part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI') : (part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW')) + ')' : ''}</p>` : part._rollToMethod === 'print' ? `<p style="margin:0 0 4px;color:#1565c0;font-size:0.9em;font-weight:bold;">📄 Roll per print: (see attached)${part.rollType ? ' (' + (part.partType === 'tee_bar' ? (part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI') : (part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW')) + ')' : ''}</p>` : (part.diameter || part.radius) ? `<p style="margin:0 0 4px;color:#1565c0;font-size:0.9em;">🔄 ${part.diameter || part.radius}" ${(() => { const mp = part._rollMeasurePoint || 'inside'; const isRad = !!part.radius && !part.diameter; if (mp === 'inside') return isRad ? 'ISR' : 'ID'; if (mp === 'outside') return isRad ? 'OSR' : 'OD'; return isRad ? 'CLR' : 'CLD'; })()}${part.rollType ? ' (' + (part.partType === 'tee_bar' ? (part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI') : (part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW')) + ')' : ''}${part.arcDegrees ? ' | Arc: ' + part.arcDegrees + '°' : ''}</p>` : ''}
-        ${(() => { const desc = part._rollingDescription || part.specialInstructions || ''; const lines = desc.split('\n').filter(l => l.includes('Rise:') || l.includes('Complete Ring') || l.includes('Cone:') || l.includes('Sheet Size:')); return lines.length ? `<p style="margin:0 0 4px;color:#6a1b9a;font-size:0.85em;">📐 ${lines.map(l => l.trim()).join(' | ')}</p>` : ''; })()}
-        ${part._completeRings && part._ringsNeeded ? `<p style="margin:0 0 4px;color:#2e7d32;font-size:0.9em;font-weight:bold;">⭕ ${part._ringsNeeded} complete ring(s) required</p>` : ''}
-        ${part.partType === 'cone_roll' ? `
-          <p style="margin:0 0 4px;color:#4a148c;font-size:0.9em;">
-            ${part._coneType === 'eccentric' ? 'Eccentric' + (part._coneEccentricAngle ? ' = ' + part._coneEccentricAngle + '°' : '') : 'Concentric'}${(parseInt(part._coneRadialSegments) || 1) > 1 ? ' | ' + part._coneRadialSegments + ' @ ' + (360 / (parseInt(part._coneRadialSegments) || 1)).toFixed(0) + '°' : ''}
-          </p>
-        ` : ''}
-        ${part._pitchEnabled ? `<p style="margin:0 0 4px;color:#e65100;font-size:0.9em;">🌀 Pitch: ${part._pitchDirection === 'clockwise' ? 'CW' : 'CCW'}${part._pitchMethod === 'runrise' && part._pitchRise ? ' | Run: ' + part._pitchRun + '" / Rise: ' + part._pitchRise + '"' : ''}${part._pitchMethod === 'degree' && part._pitchAngle ? ' | Angle: ' + part._pitchAngle + '°' : ''}${part._pitchMethod === 'space' && part._pitchSpaceValue ? ' | ' + (part._pitchSpaceType === 'center' ? 'C-C' : 'Between') + ': ' + part._pitchSpaceValue + '"' : ''}${part._pitchDevelopedDia > 0 ? ' | <strong style="color:#2e7d32;">Dev Ø: ' + parseFloat(part._pitchDevelopedDia).toFixed(4) + '"</strong>' : ''}</p>` : ''}
-        ${!['fab_service', 'shop_rate'].includes(part.partType) ? (part.materialSource === 'customer_supplied' || !part.weSupplyMaterial ? `<p style="color:#388e3c;">Material supplied by: ${formData.clientName || 'Customer'}</p>` : `<p style="color:#388e3c;">Material supplied by: Carolina Rolling Company</p>`) : ''}
-        ${part.partType === 'cone_roll' && part.cutFileReference ? `<p style="margin:0 0 4px;color:#1565c0;font-size:0.9em;">Layout Filename: ${part.cutFileReference}</p>` : ''}
-        ${pricingHtml}
-        ${part.partType === 'shop_rate' ? '<p style="margin:8px 0 0;padding:8px;background:#fff3e0;border:1px solid #ffcc80;border-radius:6px;font-size:0.85em;color:#e65100;">⚠️ Pricing is an estimate based on predicted hours. Actual cost may vary depending on hours required to complete the job.</p>' : ''}
+      const laborRatio = (totals.minInfo.minimumApplies && totals.minInfo.totalLabor > 0 && isEaPricing) ? totals.minInfo.adjustedLabor / totals.minInfo.totalLabor : 1;
+      const adjLaborEach = calc.laborEach * laborRatio;
+      const adjUnitPrice = (calc.materialEach || 0) + adjLaborEach;
+      const adjPartTotal = adjUnitPrice * (parseInt(part.quantity) || 1);
+      
+      // Build description lines (matching PDF style)
+      const descLines = [];
+      
+      if (part.clientPartNumber) descLines.push(`Client Part#: ${part.clientPartNumber}`);
+      
+      // Material description
+      if (part.partType === 'cone_roll') {
+        const thk = part.thickness || '';
+        const ldType = (part._coneLargeDiaType || 'inside') === 'inside' ? 'ID' : (part._coneLargeDiaType === 'outside' ? 'OD' : 'CLD');
+        const sdType = (part._coneSmallDiaType || 'inside') === 'inside' ? 'ID' : (part._coneSmallDiaType === 'outside' ? 'OD' : 'CLD');
+        const ld = parseFloat(part._coneLargeDia) || 0;
+        const sd = parseFloat(part._coneSmallDia) || 0;
+        const vh = parseFloat(part._coneHeight) || 0;
+        let c = thk ? thk + ' ' : '';
+        c += 'Cone - ';
+        if (ld && sd && vh) c += ld.toFixed(1) + '" ' + ldType + ' x ' + sd.toFixed(1) + '" ' + sdType + ' x ' + vh.toFixed(1) + '" VH';
+        if (part.material) c += ' ' + part.material;
+        if (part._materialOrigin) c += ' ' + part._materialOrigin;
+        descLines.push(c);
+      } else if (part.materialDescription) {
+        descLines.push(part.materialDescription);
+      } else {
+        const specs = [];
+        if (part.material) specs.push(part.material);
+        if (part.sectionSize) specs.push(part.partType === 'pipe_roll' && part._schedule ? part.sectionSize.replace(' Pipe', ` Sch ${part._schedule} Pipe`) : part.sectionSize);
+        if (part.thickness) specs.push(part.thickness);
+        if (part.width) specs.push(`${part.width}" wide`);
+        if (part.length) specs.push(part.length.toString().includes('"') || part.length.toString().includes("'") ? part.length : `${part.length}" long`);
+        if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
+        if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`${part.wallThickness}" wall`);
+        if (part.wallThickness === 'SOLID') specs.push('Solid Bar');
+        if (specs.length) descLines.push(specs.join(' x '));
+      }
+      
+      // Rolling info
+      const rollVal = part.diameter || part.radius;
+      if (rollVal) {
+        const mp = part._rollMeasurePoint || 'inside';
+        const isRad = !!part.radius && !part.diameter;
+        const specLbl = mp === 'inside' ? (isRad ? 'ISR' : 'ID') : mp === 'outside' ? (isRad ? 'OSR' : 'OD') : (isRad ? 'CLR' : 'CLD');
+        const dirLbl = part.rollType ? (part.partType === 'tee_bar' ? (part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI') : (part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW')) : '';
+        let rl = 'Roll: ' + rollVal + '" ' + specLbl;
+        if (dirLbl) rl += ' (' + dirLbl + ')';
+        if (part.arcDegrees) rl += ' | Arc: ' + part.arcDegrees + '°';
+        descLines.push(rl);
+      } else if (part._rollToMethod === 'template') {
+        descLines.push('Roll Per Template / Sample');
+      } else if (part._rollToMethod === 'print') {
+        descLines.push('Roll per print (see attached)');
+      }
+      
+      if (part._completeRings && part._ringsNeeded) descLines.push(part._ringsNeeded + ' complete ring(s) required');
+      if ((part.partType === 'angle_roll' || part.partType === 'channel_roll') && part._orientationOption) {
+        descLines.push('Orientation: ' + (part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID') + ' Option ' + part._orientationOption);
+      }
+      if (part.partType === 'cone_roll') {
+        const cType = part._coneType === 'eccentric' ? 'Eccentric' + (part._coneEccentricAngle ? ' = ' + part._coneEccentricAngle + '°' : '') : 'Concentric';
+        const rSegs = parseInt(part._coneRadialSegments) || 1;
+        descLines.push(cType + (rSegs > 1 ? ' | ' + rSegs + ' @ ' + (360/rSegs).toFixed(0) + '°' : ''));
+        if (part.cutFileReference) descLines.push('Layout: ' + part.cutFileReference);
+      }
+      
+      if (part._pitchEnabled) {
+        let pLine = 'Pitch: ' + (part._pitchDirection === 'clockwise' ? 'CW' : 'CCW');
+        if (part._pitchMethod === 'runrise' && part._pitchRise) pLine += ' | Run: ' + part._pitchRun + '" / Rise: ' + part._pitchRise + '"';
+        if (part._pitchDevelopedDia > 0) pLine += ' | Dev Ø: ' + parseFloat(part._pitchDevelopedDia).toFixed(4) + '"';
+        descLines.push(pLine);
+      }
+      
+      // Material source
+      if (!['fab_service', 'shop_rate'].includes(part.partType)) {
+        descLines.push('Material by: ' + (part.materialSource === 'customer_supplied' ? (formData.clientName || 'Customer') : 'Carolina Rolling Company'));
+      }
+      
+      if (part.specialInstructions) descLines.push('Note: ' + (part.specialInstructions.length > 80 ? part.specialInstructions.substring(0, 80) + '...' : part.specialInstructions));
+      
+      // Pricing detail line
+      const priceParts = [];
+      if (calc.materialEach > 0) priceParts.push('Material: ' + formatCurrency(calc.materialEach));
+      if (adjLaborEach > 0) priceParts.push((part.partType === 'fab_service' ? 'Service' : part.partType === 'shop_rate' ? 'Shop Rate' : part.partType === 'flat_stock' ? 'Handling' : 'Rolling') + ': ' + formatCurrency(adjLaborEach));
+      
+      const partTypeLabel = PART_TYPES[part.partType]?.label || part.partType;
+      
+      return `<div class="part-row${isLinkedService ? ' service' : ''}">
+        <div class="pr-item${isLinkedService ? ' svc' : ''}">${isLinkedService ? '+' : '#' + part.partNumber}</div>
+        <div class="pr-desc">
+          <div class="pr-type${isLinkedService ? ' svc' : ''}">${partTypeLabel}${isLinkedService && linkedParent ? ' <span style="font-weight:400;color:#999;">(for Part #' + linkedParent.partNumber + ')</span>' : ''}</div>
+          <div class="pr-detail">${descLines.join('<br/>')}</div>
+          ${priceParts.length ? '<div class="pr-pricing">' + priceParts.join(' &nbsp;|&nbsp; ') + ' &nbsp;|&nbsp; <strong>Unit: ' + formatCurrency(adjUnitPrice) + '</strong></div>' : ''}
+          ${part.partType === 'shop_rate' ? '<div class="shop-rate-warn">* Pricing based on estimated hours — actual cost may vary</div>' : ''}
+        </div>
+        <div class="pr-qty">${part.quantity}</div>
+        <div class="pr-unit">${formatCurrency(adjUnitPrice)}</div>
+        <div class="pr-amt">${formatCurrency(adjPartTotal)}</div>
       </div>`;
     }).join('');
     
     const taxLine = formData.taxExempt 
-      ? `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ddd;"><span>Tax</span><span style="color:#c62828;font-weight:bold;">EXEMPT${formData.taxExemptCertNumber ? ` (Cert#: ${formData.taxExemptCertNumber})` : ''}</span></div>`
-      : `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ddd;"><span>Tax (${formData.taxRate}%)</span><span>${formatCurrency(totals.taxAmount)}</span></div>`;
+      ? `<div class="total-row"><span>Tax</span><span style="color:#c62828;font-weight:bold;">EXEMPT</span></div>`
+      : `<div class="total-row"><span>Tax (${formData.taxRate}%)</span><span>${formatCurrency(totals.taxAmount)}</span></div>`;
     
     const discountLine = totals.discountAmt > 0
-      ? `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ddd;color:#c62828;"><span>Discount${formData.discountReason ? ` (${formData.discountReason})` : ''}</span><span>-${formatCurrency(totals.discountAmt)}</span></div>` : '';
+      ? `<div class="total-row" style="color:#c62828;"><span>Discount${formData.discountReason ? ` (${formData.discountReason})` : ''}</span><span>-${formatCurrency(totals.discountAmt)}</span></div>` : '';
 
     const minimumLine = totals.minInfo.minimumApplies
-      ? `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #ddd;font-size:0.85em;color:#e65100;"><span>Minimum Labor Charge Applied (${totals.minInfo.highestMinRule?.label || ''})</span><span>${formatCurrency(totals.minInfo.adjustedLabor)}</span></div>` : '';
+      ? `<div class="total-row" style="font-size:11px;color:#e65100;"><span>Minimum Labor Charge (${totals.minInfo.highestMinRule?.label || ''})</span><span>${formatCurrency(totals.minInfo.adjustedLabor)}</span></div>` : '';
 
     const w = window.open('', '_blank');
     w.document.write(`<!DOCTYPE html><html><head><title>Estimate ${estimate?.estimateNumber}</title>
-      <style>body{font-family:Arial,sans-serif;padding:40px;max-width:800px;margin:0 auto}</style></head><body>
-      <h1 style="color:#1976d2;">Carolina Rolling</h1><p>Estimate: <strong>${estimate?.estimateNumber}</strong></p>
-      <h2>Client: ${formData.clientName}</h2>
-      ${formData.contactName ? `<p>Contact: ${formData.contactName}</p>` : ''}
-      ${formData.projectDescription ? `<p>Project: ${formData.projectDescription}</p>` : ''}
-      <h3>Parts</h3>${partsHtml}
-      ${formData.truckingCost > 0 ? `<div style="background:#fff3e0;padding:12px;border-radius:8px;margin:12px 0;"><strong>🚚 Trucking:</strong> ${formData.truckingDescription || ''} - ${formatCurrency(formData.truckingCost)} (Not Taxed)</div>` : ''}
-      <div style="background:#f0f7ff;padding:16px;border-radius:8px;margin-top:20px;">
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, Helvetica, sans-serif; padding: 32px 40px; max-width: 850px; margin: 0 auto; font-size: 13px; color: #333; }
+        @page { size: letter; margin: 0.5in; }
+        @media print { body { padding: 0; } }
+        .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+        .doc-title { font-size: 20px; font-weight: 700; color: #1976d2; }
+        .doc-right { text-align: right; }
+        .doc-num { font-size: 13px; font-weight: 700; color: #333; }
+        .doc-date { font-size: 11px; color: #888; }
+        .divider { border: none; border-top: 1px solid #ccc; margin: 8px 0; }
+        .info-grid { display: flex; gap: 24px; padding: 8px 0; margin-bottom: 6px; font-size: 12px; flex-wrap: wrap; }
+        .info-item label { display: block; font-size: 9px; text-transform: uppercase; color: #999; letter-spacing: 0.5px; font-weight: 600; }
+        .info-item span { font-weight: 600; color: #333; }
+        .section-title { font-size: 11px; text-transform: uppercase; color: #1976d2; font-weight: 700; letter-spacing: 0.5px; margin: 14px 0 6px; }
+        .parts-header { display: flex; background: #f5f5f5; padding: 6px 0; border-bottom: 2px solid #ccc; font-size: 9px; text-transform: uppercase; color: #888; font-weight: 700; letter-spacing: 0.5px; }
+        .ph-item { width: 42px; padding-left: 4px; }
+        .ph-desc { flex: 1; padding-left: 8px; }
+        .ph-qty { width: 40px; text-align: center; }
+        .ph-unit { width: 65px; text-align: right; }
+        .ph-amt { width: 70px; text-align: right; padding-right: 4px; }
+        .part-row { display: flex; padding: 8px 0; border-bottom: 1px solid #eee; page-break-inside: avoid; }
+        .part-row.service { background: #f9f5fb; padding-left: 20px; }
+        .pr-item { width: 42px; font-weight: 700; color: #1976d2; font-size: 11px; padding-left: 4px; flex-shrink: 0; }
+        .pr-item.svc { color: #7b1fa2; }
+        .pr-desc { flex: 1; padding-left: 8px; }
+        .pr-type { font-weight: 700; font-size: 11px; color: #333; }
+        .pr-type.svc { color: #7b1fa2; font-size: 10px; }
+        .pr-detail { font-size: 10px; color: #666; line-height: 1.5; margin-top: 2px; }
+        .pr-pricing { font-size: 10px; color: #555; margin-top: 3px; display: flex; gap: 12px; }
+        .pr-pricing strong { color: #1565c0; }
+        .pr-qty { width: 40px; text-align: center; font-weight: 600; font-size: 12px; flex-shrink: 0; }
+        .pr-unit { width: 65px; text-align: right; font-size: 11px; flex-shrink: 0; }
+        .pr-amt { width: 70px; text-align: right; font-weight: 700; font-size: 11px; padding-right: 4px; flex-shrink: 0; }
+        .totals-box { margin-top: 16px; padding: 12px 16px; border: 1px solid #ccc; border-radius: 6px; }
+        .total-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+        .total-row.grand { padding: 8px 0; border-top: 2px solid #1976d2; margin-top: 4px; font-size: 16px; font-weight: 700; color: #1976d2; }
+        .cc-box { margin-top: 10px; font-size: 11px; color: #666; text-align: right; }
+        .notes-box { margin-top: 12px; padding: 10px; background: #f9f9f9; border-radius: 4px; font-size: 11px; }
+        .shop-rate-warn { font-size: 10px; color: #e65100; margin-top: 2px; font-style: italic; }
+      </style></head><body>
+
+      <div class="doc-header">
+        <span class="doc-title">ESTIMATE</span>
+        <div class="doc-right">
+          <div class="doc-num">${estimate?.estimateNumber}</div>
+          <div class="doc-date">Date: ${new Date(estimate?.createdAt).toLocaleDateString()}</div>
+        </div>
+      </div>
+      ${formData.taxExempt ? '<div style="color:#c62828;font-weight:700;font-size:11px;text-align:right;margin-top:-4px;">TAX EXEMPT</div>' : ''}
+      <hr class="divider" />
+
+      <div class="info-grid">
+        <div class="info-item"><label>Client</label><span>${formData.clientName}</span></div>
+        ${formData.contactName ? `<div class="info-item"><label>Contact</label><span>${formData.contactName}</span></div>` : ''}
+        ${formData.contactEmail ? `<div class="info-item"><label>Email</label><span>${formData.contactEmail}</span></div>` : ''}
+        ${formData.contactPhone ? `<div class="info-item"><label>Phone</label><span>${formData.contactPhone}</span></div>` : ''}
+      </div>
+      ${formData.projectDescription ? `<div style="font-size:11px;color:#666;margin-bottom:8px;"><strong>Project:</strong> ${formData.projectDescription}</div>` : ''}
+
+      <div class="section-title">SERVICES & MATERIALS</div>
+      <div class="parts-header">
+        <div class="ph-item">ITEM</div>
+        <div class="ph-desc">DESCRIPTION</div>
+        <div class="ph-qty">QTY</div>
+        <div class="ph-unit">UNIT</div>
+        <div class="ph-amt">AMOUNT</div>
+      </div>
+
+      ${partsHtml}
+
+      ${formData.truckingCost > 0 ? `
+        <div class="part-row">
+          <div class="pr-item"></div>
+          <div class="pr-desc"><span class="pr-type">Trucking / Delivery</span>${formData.truckingDescription ? `<div class="pr-detail">${formData.truckingDescription}</div>` : ''}<div class="pr-detail" style="color:#e65100;">Not Taxed</div></div>
+          <div class="pr-qty"></div>
+          <div class="pr-unit"></div>
+          <div class="pr-amt">${formatCurrency(formData.truckingCost)}</div>
+        </div>
+      ` : ''}
+
+      <div class="totals-box">
         ${minimumLine}
-        ${totals.expediteAmount > 0 ? `<div style="display:flex;justify-content:space-between;padding:6px 0;color:#e65100;border-bottom:1px solid #ffcc80"><span>🚨 ${totals.expediteLabel}</span><strong>${formatCurrency(totals.expediteAmount)}</strong></div>` : ''}
-        ${totals.emergencyAmount > 0 ? `<div style="display:flex;justify-content:space-between;padding:6px 0;color:#c62828;border-bottom:1px solid #ffcc80"><span>🚨 ${totals.emergencyLabel}</span><strong>${formatCurrency(totals.emergencyAmount)}</strong></div>` : ''}
-        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ddd;"><span>Parts Subtotal</span><span>${formatCurrency(totals.partsSubtotal)}</span></div>
+        ${totals.expediteAmount > 0 ? `<div class="total-row" style="color:#e65100;"><span>🚨 ${totals.expediteLabel}</span><strong>${formatCurrency(totals.expediteAmount)}</strong></div>` : ''}
+        ${totals.emergencyAmount > 0 ? `<div class="total-row" style="color:#c62828;"><span>🚨 ${totals.emergencyLabel}</span><strong>${formatCurrency(totals.emergencyAmount)}</strong></div>` : ''}
+        <div class="total-row"><span>Parts Subtotal</span><span>${formatCurrency(totals.partsSubtotal)}</span></div>
+        ${totals.trucking > 0 ? `<div class="total-row"><span>Trucking</span><span>${formatCurrency(totals.trucking)}</span></div>` : ''}
         ${discountLine}
-        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ddd;"><span>Trucking</span><span>${formatCurrency(totals.trucking)}</span></div>
         ${taxLine}
-        <div style="display:flex;justify-content:space-between;padding:12px 0;font-size:1.3em;font-weight:bold;color:#1976d2;"><span>Grand Total</span><span>${formatCurrency(totals.grandTotal)}</span></div>
+        <div class="total-row grand"><span>Grand Total</span><span>${formatCurrency(totals.grandTotal)}</span></div>
       </div>
-      <div style="text-align:right;margin-top:16px;padding-top:12px;border-top:1px solid #ccc;font-size:0.9em;color:#555;line-height:1.8;">
-        <div style="font-weight:600;color:#333;">Total with Credit Card Fees</div>
-        <div>In-Person (2.6% + $0.15): <strong>${formatCurrency(totals.ccInPersonTotal)}</strong></div>
-        <div>Manual (3.5% + $0.15): <strong>${formatCurrency(totals.ccManualTotal)}</strong></div>
+
+      <div class="cc-box">
+        <strong>Total with Credit Card Fees:</strong>
+        In-Person (2.6% + $0.15): <strong>${formatCurrency(totals.ccInPersonTotal)}</strong> |
+        Manual (3.5% + $0.15): <strong>${formatCurrency(totals.ccManualTotal)}</strong>
       </div>
-      ${formData.notes ? `<div style="margin-top:20px;padding:12px;background:#f9f9f9;border-radius:8px;"><strong>Terms:</strong> ${formData.notes}</div>` : ''}
+
+      ${formData.notes ? `<div class="notes-box"><strong>Terms:</strong> ${formData.notes}</div>` : ''}
       </body></html>`);
     w.document.close();
     w.print();
@@ -1131,8 +1376,8 @@ function EstimateDetailsPage() {
         </div>
         <div className="actions-row">
           {!isNew && (
-            <button className="btn btn-outline" onClick={handleDownloadPDF} disabled={downloadingPDF}>
-              <FileDown size={18} /> {downloadingPDF ? 'Generating...' : 'Download PDF'}
+            <button className="btn btn-outline" onClick={generatePdfPreview} disabled={pdfGenerating}>
+              <Eye size={18} /> {pdfGenerating ? 'Generating...' : 'Generate PDF'}
             </button>
           )}
           {!isNew && <button className="btn btn-outline" onClick={printEstimate}><Printer size={18} /> Print</button>}
@@ -1178,6 +1423,168 @@ function EstimateDetailsPage() {
 
       {error && <div className="alert alert-error" style={{ whiteSpace: 'pre-line' }}>{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
+
+      {/* Stored PDF File Bar */}
+      {!isNew && files.some(f => (f.originalName || f.filename || '').startsWith('Generated-Estimate-')) && !pdfPreviewUrl && (
+        <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', background: '#f0f7ff', border: '1px solid #bbdefb', borderRadius: 8 }}>
+          <FileText size={18} style={{ color: '#1976d2' }} />
+          <span style={{ flex: 1, fontWeight: 600, fontSize: '0.9rem', color: '#333' }}>
+            Estimate-{estimate?.estimateNumber || id}.pdf
+          </span>
+          <button onClick={viewStoredPdf} disabled={pdfGenerating}
+            title="Preview PDF"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: '#1976d2' }}>
+            <Eye size={18} />
+          </button>
+          <button onClick={downloadStoredPdf}
+            title="Download PDF"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: '#1976d2' }}>
+            <FileDown size={18} />
+          </button>
+        </div>
+      )}
+
+      {/* PDF Preview (expanded) */}
+      {pdfPreviewUrl && (
+        <div style={{ marginBottom: 16, border: '2px solid #1976d2', borderRadius: 12, overflow: 'hidden', background: '#f5f5f5' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', background: '#1976d2', color: 'white' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: '0.9rem' }}>
+              <FileText size={16} /> PDF Preview
+              {pdfGenerating && <span style={{ fontSize: '0.8rem', opacity: 0.8 }}> — Regenerating...</span>}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={generatePdfPreview} disabled={pdfGenerating}
+                style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.4)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>
+                ↻ Refresh
+              </button>
+              <button onClick={handleDownloadFromPreview}
+                style={{ background: 'white', color: '#1976d2', border: 'none', borderRadius: 6, padding: '4px 12px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><FileDown size={14} /> Download</span>
+              </button>
+              <button onClick={closePdfPreview}
+                style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.4)', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', lineHeight: 1 }}>
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+          <iframe
+            src={pdfPreviewUrl}
+            style={{ width: '100%', height: '80vh', border: 'none', display: 'block' }}
+            title="Estimate PDF Preview"
+          />
+        </div>
+      )}
+
+      {/* Status Workflow Bar */}
+      {!isNew && estimate && (
+        <div style={{ 
+          display: 'flex', alignItems: 'center', gap: 12, padding: '12px 20px', marginBottom: 16,
+          background: '#f5f5f5', borderRadius: 10, border: '1px solid #e0e0e0', flexWrap: 'wrap'
+        }}>
+          {/* Status steps */}
+          {[
+            { key: 'draft', label: 'Draft', icon: '📝', color: '#757575', bg: '#eeeeee' },
+            { key: 'sent', label: 'Sent', icon: '📤', color: '#1565c0', bg: '#e3f2fd' },
+            { key: 'accepted', label: 'Accepted', icon: '✅', color: '#2e7d32', bg: '#e8f5e9' },
+          ].map((step, idx) => {
+            const statusOrder = ['draft', 'sent', 'accepted', 'declined', 'converted', 'archived'];
+            const currentIdx = statusOrder.indexOf(estimate.status);
+            const stepIdx = statusOrder.indexOf(step.key);
+            const isActive = estimate.status === step.key;
+            const isPast = stepIdx < currentIdx || (estimate.status === 'converted' && step.key !== 'converted');
+            const ts = step.key === 'sent' ? estimate.sentAt : step.key === 'accepted' ? estimate.acceptedAt : estimate.createdAt;
+            return (
+              <React.Fragment key={step.key}>
+                {idx > 0 && <div style={{ width: 24, height: 2, background: isPast || isActive ? step.color : '#ccc' }} />}
+                <div style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                  opacity: isPast || isActive ? 1 : 0.4,
+                }}>
+                  <div style={{
+                    padding: '6px 14px', borderRadius: 20, fontSize: '0.85rem', fontWeight: 600,
+                    background: isActive ? step.bg : isPast ? step.bg : '#eee',
+                    color: isActive || isPast ? step.color : '#999',
+                    border: isActive ? `2px solid ${step.color}` : '2px solid transparent',
+                  }}>
+                    {step.icon} {step.label}
+                  </div>
+                  {ts && (isPast || isActive) && (
+                    <div style={{ fontSize: '0.7rem', color: '#888' }}>
+                      {new Date(ts).toLocaleDateString()} {new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  )}
+                </div>
+              </React.Fragment>
+            );
+          })}
+
+          {/* Converted indicator */}
+          {estimate.workOrderId && (
+            <>
+              <div style={{ width: 24, height: 2, background: '#7b1fa2' }} />
+              <div style={{ padding: '6px 14px', borderRadius: 20, fontSize: '0.85rem', fontWeight: 600, background: '#f3e5f5', color: '#7b1fa2', border: '2px solid #7b1fa2' }}>
+                🔄 Work Order Created
+              </div>
+            </>
+          )}
+
+          {/* Declined indicator */}
+          {estimate.status === 'declined' && (
+            <div style={{ padding: '6px 14px', borderRadius: 20, fontSize: '0.85rem', fontWeight: 600, background: '#ffebee', color: '#c62828', border: '2px solid #c62828' }}>
+              ❌ Declined
+            </div>
+          )}
+
+          {/* Spacer */}
+          <div style={{ flex: 1 }} />
+
+          {/* Action buttons */}
+          {estimate.status === 'draft' && (
+            <button className="btn btn-sm" onClick={async () => {
+              try {
+                await updateEstimate(id, { status: 'sent' });
+                await loadEstimate();
+                showMessage('Estimate marked as sent');
+              } catch (err) { setError('Failed to update status'); }
+            }} style={{ background: '#1565c0', color: 'white', borderRadius: 20, padding: '6px 16px' }}>
+              📤 Mark as Sent
+            </button>
+          )}
+          {estimate.status === 'sent' && (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn-sm" onClick={async () => {
+                try {
+                  await updateEstimate(id, { status: 'accepted' });
+                  await loadEstimate();
+                  showMessage('Estimate marked as accepted');
+                } catch (err) { setError('Failed to update status'); }
+              }} style={{ background: '#2e7d32', color: 'white', borderRadius: 20, padding: '6px 16px' }}>
+                ✅ Mark as Accepted
+              </button>
+              <button className="btn btn-sm" onClick={async () => {
+                try {
+                  await updateEstimate(id, { status: 'declined' });
+                  await loadEstimate();
+                  showMessage('Estimate marked as declined');
+                } catch (err) { setError('Failed to update status'); }
+              }} style={{ background: '#fff', color: '#c62828', border: '1px solid #c62828', borderRadius: 20, padding: '6px 16px' }}>
+                ❌ Decline
+              </button>
+            </div>
+          )}
+          {(estimate.status === 'declined' || estimate.status === 'archived') && (
+            <button className="btn btn-sm" onClick={async () => {
+              try {
+                await updateEstimate(id, { status: 'draft' });
+                await loadEstimate();
+                showMessage('Estimate reset to draft');
+              } catch (err) { setError('Failed to update status'); }
+            }} style={{ background: '#fff', color: '#555', border: '1px solid #999', borderRadius: 20, padding: '6px 16px' }}>
+              ↩ Reset to Draft
+            </button>
+          )}
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
         <div>
@@ -1267,6 +1674,15 @@ function EstimateDetailsPage() {
                         </span>
                       </div>
                     ))}
+                    {formData.clientName && formData.clientName.length >= 2 && !clientSuggestions.some(c => c.name.toLowerCase() === formData.clientName.toLowerCase()) && (
+                      <div style={{ padding: '8px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600, borderTop: '2px solid #c8e6c9' }}
+                        onMouseDown={() => {
+                          setShowClientSuggestions(false);
+                          navigate(`/clients-vendors?addClient=${encodeURIComponent(formData.clientName)}`);
+                        }}>
+                        + Add "{formData.clientName}" as new client
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1303,15 +1719,9 @@ function EstimateDetailsPage() {
           <div className="card">
             <div className="card-header">
               <h3 className="card-title">📦 Parts ({parts.length})</h3>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn btn-outline btn-sm" onClick={() => setShowImportModal(true)} disabled={isNew}
-                  title="Import parts from a PDF or text file">
-                  <Upload size={16} /> Import from File
-                </button>
-                <button className="btn btn-primary btn-sm" onClick={openAddPartModal} disabled={isNew}>
-                  <Plus size={16} /> Add Part
-                </button>
-              </div>
+              <button className="btn btn-primary btn-sm" onClick={openAddPartModal} disabled={isNew}>
+                <Plus size={16} /> Add Part
+              </button>
             </div>
 
             {isNew && <p style={{ color: '#666', padding: 20, textAlign: 'center' }}>Save the estimate first to add parts</p>}
@@ -1340,21 +1750,27 @@ function EstimateDetailsPage() {
               const calc = calculatePartTotal(part);
               const isLinkedService = ['fab_service', 'shop_rate'].includes(part.partType) && (part._linkedPartId || (part.formData || {})._linkedPartId);
               const linkedParent = isLinkedService ? parts.find(p => String(p.id) === String(part._linkedPartId || (part.formData || {})._linkedPartId)) : null;
+              // Adjust labor proportionally when minimum charge applies
+              const isEa = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(part.partType);
+              const laborRatio = (totals.minInfo.minimumApplies && totals.minInfo.totalLabor > 0 && isEa) ? totals.minInfo.adjustedLabor / totals.minInfo.totalLabor : 1;
+              const adjLabor = (calc.laborEach || 0) * laborRatio;
+              const adjUnitPrice = (calc.materialEach || 0) + adjLabor;
+              const adjPartTotal = adjUnitPrice * (parseInt(part.quantity) || 1);
               return (
                 <div key={part.id} style={{
-                  border: isLinkedService ? '2px solid #ce93d8' : '2px solid #e0e0e0',
+                  border: isLinkedService ? '2px solid #9e9e9e' : '2px solid #e0e0e0',
                   borderRadius: 12, padding: isLinkedService ? '12px 16px' : 16, marginBottom: isLinkedService ? 4 : 12,
                   marginLeft: isLinkedService ? 32 : 0, marginTop: isLinkedService ? -4 : 0,
-                  background: isLinkedService ? '#fce4ec' : 'white',
+                  background: isLinkedService ? '#eeeeee' : 'white',
                   borderTopLeftRadius: isLinkedService ? 4 : 12, borderTopRightRadius: isLinkedService ? 4 : 12,
                 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, paddingBottom: 8, borderBottom: isLinkedService ? '1px solid #e1bee7' : '1px solid #eee' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, paddingBottom: 8, borderBottom: isLinkedService ? '1px solid #bdbdbd' : '1px solid #eee' }}>
                     <div>
-                      <div style={{ fontSize: isLinkedService ? '0.95rem' : '1.1rem', fontWeight: 700, color: isLinkedService ? '#7b1fa2' : '#1976d2' }}>
-                        {isLinkedService && <span style={{ marginRight: 6 }}>↳</span>}
+                      <div style={{ fontSize: isLinkedService ? '0.95rem' : '1.1rem', fontWeight: 700, color: isLinkedService ? '#424242' : '#1976d2' }}>
+                        {isLinkedService && <span style={{ marginRight: 6 }}>+</span>}
                         Part #{part.partNumber} - {PART_TYPES[part.partType]?.label || part.partType}
                         {isLinkedService && linkedParent && (
-                          <span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#9c27b0', marginLeft: 8 }}>
+                          <span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#757575', marginLeft: 8 }}>
                             for Part #{linkedParent.partNumber}
                           </span>
                         )}
@@ -1451,6 +1867,19 @@ function EstimateDetailsPage() {
                     {part._completeRings && part._ringsNeeded && (
                       <div style={{ fontSize: '0.85rem', color: '#2e7d32', fontWeight: 600, marginTop: 4 }}>⭕ {part._ringsNeeded} complete ring(s) required</div>
                     )}
+                    {/* Orientation diagram for angle/channel rolls */}
+                    {(part.partType === 'angle_roll' || part.partType === 'channel_roll') && part._orientationOption && (
+                      <div style={{ marginTop: 8, maxWidth: 250 }}>
+                        <img 
+                          src={`/images/angle-orientation/${part.partType === 'channel_roll' ? 'Channel' : ''}${part.rollType === 'easy_way' ? 'EWOD' : 'HWID'}Op${part._orientationOption}.png`}
+                          alt={`${part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID'} Option ${part._orientationOption}`}
+                          style={{ width: '100%', borderRadius: 6, border: '1px solid #ddd' }}
+                        />
+                        <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', marginTop: 2 }}>
+                          {part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID'} Option {part._orientationOption}
+                        </div>
+                      </div>
+                    )}
                     {/* Cone type + segments */}
                     {part.partType === 'cone_roll' && (
                       <div style={{ fontSize: '0.8rem', color: '#4a148c', marginTop: 4 }}>
@@ -1491,12 +1920,17 @@ function EstimateDetailsPage() {
                   {/* Costs Section - ea pricing */}
                   {['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(part.partType) ? (
                     <div style={{ background: '#f9f9f9', borderRadius: 8, padding: 12 }}>
+                      {part.clientPartNumber && (
+                        <div style={{ fontSize: '0.8rem', color: '#1565c0', fontWeight: 600, marginBottom: 6, paddingBottom: 6, borderBottom: '1px solid #e0e0e0' }}>
+                          🏷️ Client Part#: {part.clientPartNumber}
+                        </div>
+                      )}
                       {part.materialDescription && (
                         <div style={{ fontSize: '0.85rem', color: '#555', marginBottom: 8, paddingBottom: 8, borderBottom: '1px solid #eee' }}>
                           📦 {part.materialDescription}
                           {!['fab_service', 'shop_rate'].includes(part.partType) && (
                             <div style={{ marginTop: 4, fontSize: '0.8rem', color: '#2e7d32', fontWeight: 600 }}>
-                              {part._materialSource === 'we_order' || part.weSupplyMaterial ? 'Material supplied by: Carolina Rolling Company' : `Material supplied by: ${formData.clientName || 'Customer'}`}
+                              {part.materialSource === 'we_order' ? 'Material supplied by: Carolina Rolling Company' : part.materialSource === 'in_stock' ? 'Material supplied by: Carolina Rolling Company' : `Material supplied by: ${formData.clientName || 'Customer'}`}
                             </div>
                           )}
                         </div>
@@ -1511,15 +1945,15 @@ function EstimateDetailsPage() {
                       {/* Rolling/Labor line */}
                       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '0.9rem', color: '#555' }}>
                         <span>{part.partType === 'fab_service' ? 'Service' : part.partType === 'shop_rate' ? 'Shop Rate' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}</span>
-                        <strong>{formatCurrency(calc.laborEach)}</strong>
+                        <strong>{formatCurrency(adjLabor)}</strong>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderTop: '1px solid #ddd', marginTop: 4, fontWeight: 600 }}>
                         <span>Unit Price</span>
-                        <span style={{ color: '#1976d2' }}>{formatCurrency(calc.unitPrice)}</span>
+                        <span style={{ color: '#1976d2' }}>{formatCurrency(adjUnitPrice)}</span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', fontSize: '1.05rem', borderTop: '1px solid #ddd' }}>
-                        <strong>Line Total ({part.quantity} × {formatCurrency(calc.unitPrice)})</strong>
-                        <strong style={{ color: '#2e7d32' }}>{formatCurrency(calc.partTotal)}</strong>
+                        <strong>Line Total ({part.quantity} × {formatCurrency(adjUnitPrice)})</strong>
+                        <strong style={{ color: '#2e7d32' }}>{formatCurrency(adjPartTotal)}</strong>
                       </div>
                       {part.partType === 'shop_rate' && (
                         <div style={{ background: '#fff3e0', border: '1px solid #ffcc80', borderRadius: 6, padding: 8, marginTop: 8, fontSize: '0.8rem', color: '#e65100' }}>
@@ -1654,9 +2088,9 @@ function EstimateDetailsPage() {
                   <Upload size={14} /> Upload
                 </button>
               </div>
-              {files.length > 0 ? (
+              {files.filter(f => !(f.originalName || f.filename || '').startsWith('Generated-Estimate-')).length > 0 ? (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {files.map(file => (
+                  {files.filter(f => !(f.originalName || f.filename || '').startsWith('Generated-Estimate-')).map(file => (
                     <div key={file.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', background: '#e3f2fd', borderRadius: 4, fontSize: '0.85rem' }}>
                       <span>{file.originalName || file.filename}</span>
                       <button onClick={() => handleViewFile(file)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><Eye size={14} /></button>
@@ -1711,10 +2145,13 @@ function EstimateDetailsPage() {
                   })().map(part => {
                     const calc = calculatePartTotal(part);
                     const isLS = ['fab_service', 'shop_rate'].includes(part.partType) && (part._linkedPartId || (part.formData || {})._linkedPartId);
+                    const isEa = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(part.partType);
+                    const lr = (totals.minInfo.minimumApplies && totals.minInfo.totalLabor > 0 && isEa) ? totals.minInfo.adjustedLabor / totals.minInfo.totalLabor : 1;
+                    const adjTotal = isEa ? ((calc.materialEach || 0) + (calc.laborEach || 0) * lr) * (parseInt(part.quantity) || 1) : calc.partTotal;
                     return (
-                      <div key={part.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', paddingLeft: isLS ? 12 : 0, color: isLS ? '#7b1fa2' : 'inherit', fontSize: isLS ? '0.75rem' : '0.8rem' }}>
-                        <span>{isLS ? '↳ ' : ''}Part #{part.partNumber}{isLS ? ` (${PART_TYPES[part.partType]?.label})` : ''}</span>
-                        <span>{formatCurrency(calc.partTotal)}</span>
+                      <div key={part.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', paddingLeft: isLS ? 12 : 0, color: isLS ? '#616161' : 'inherit', fontSize: isLS ? '0.75rem' : '0.8rem' }}>
+                        <span>{isLS ? '+ ' : ''}Part #{part.partNumber}{isLS ? ` (${PART_TYPES[part.partType]?.label})` : ''}</span>
+                        <span>{formatCurrency(adjTotal)}</span>
                       </div>
                     );
                   })}
@@ -1892,12 +2329,16 @@ function EstimateDetailsPage() {
                     if (p.supplierName) {
                       const matEa = parseFloat(p.materialTotal) || 0;
                       const q = parseInt(p.quantity) || 1;
-                      acc[p.supplierName] = (acc[p.supplierName] || 0) + (matEa * q);
+                      const key = p.supplierName;
+                      if (!acc[key]) acc[key] = { total: 0, estNums: new Set() };
+                      acc[key].total += matEa * q;
+                      if (p.vendorEstimateNumber) acc[key].estNums.add(p.vendorEstimateNumber);
                     }
                     return acc;
-                  }, {})).map(([supplier, total]) => (
+                  }, {})).map(([supplier, info]) => (
                     <div key={supplier} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
-                      <span>{supplier}</span><span>{formatCurrency(total)}</span>
+                      <span>{supplier}{info.estNums.size > 0 && <span style={{ color: '#999', marginLeft: 6 }}>({[...info.estNums].join(', ')})</span>}</span>
+                      <span>{formatCurrency(info.total)}</span>
                     </div>
                   ))}
                 </div>
@@ -1943,7 +2384,7 @@ function EstimateDetailsPage() {
       {/* Add/Edit Part Modal */}
       {showPartModal && (
         <div className="modal-overlay">
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 800 }}>
+          <div className="modal modal-flex" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 800 }}>
             <div className="modal-header">
               <h3 className="modal-title">
                 {editingPart ? 'Edit Part' : 'Add Part'} — {PART_TYPES[partData.partType]?.icon} {PART_TYPES[partData.partType]?.label || partData.partType}
@@ -1951,7 +2392,7 @@ function EstimateDetailsPage() {
               <button className="modal-close" onClick={() => setShowPartModal(false)}>&times;</button>
             </div>
 
-            <div className="modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+            <div className="modal-body">
 
               {/* Common fields for all part types (plate_roll, angle_roll, flat_stock have their own) */}
               {!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'cone_roll', 'tee_bar', 'press_brake', 'fab_service'].includes(partData.partType) && (
@@ -1962,9 +2403,7 @@ function EstimateDetailsPage() {
                     onChange={(e) => setPartData({ ...partData, clientPartNumber: e.target.value })} />
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Heat Number</label>
-                  <input type="text" className="form-input" value={partData.heatNumber || ''}
-                    onChange={(e) => setPartData({ ...partData, heatNumber: e.target.value })} />
+                  <HeatNumberInput partData={partData} setPartData={setPartData} />
                 </div>
                 <div className="form-group">
                   <label className="form-label">Cut File Reference</label>
@@ -2218,6 +2657,16 @@ function EstimateDetailsPage() {
                       )}
                     </div>
                     <div className="form-group" style={{ margin: 0 }}>
+                      <label className="form-label">Vendor Estimate #</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        value={partData.vendorEstimateNumber || ''}
+                        onChange={(e) => setPartData({ ...partData, vendorEstimateNumber: e.target.value })}
+                        placeholder="Optional"
+                      />
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
                       <label className="form-label">Unit Cost ($)</label>
                       <input type="number" className="form-input" value={partData.materialUnitCost || ''}
                         onChange={(e) => setPartData({ ...partData, materialUnitCost: e.target.value })}
@@ -2457,6 +2906,29 @@ function EstimateDetailsPage() {
                 </p>
               </div>
 
+              {/* DR Number Preview */}
+              <div style={{ background: '#e3f2fd', padding: 14, borderRadius: 8, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: '0.8rem', color: '#666' }}>DR Number</div>
+                  <div style={{ fontWeight: 700, fontSize: '1.3rem', color: '#1565c0' }}>
+                    DR-{useCustomDR ? (customDR || '?') : (nextDR || '...')}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '0.85rem' }}>
+                    <input type="checkbox" checked={useCustomDR} onChange={(e) => { setUseCustomDR(e.target.checked); if (!e.target.checked) setCustomDR(''); }} />
+                    <span>Use different DR#</span>
+                  </label>
+                  {useCustomDR && (
+                    <input type="number" className="form-input" value={customDR}
+                      onChange={(e) => setCustomDR(e.target.value)}
+                      placeholder="Enter DR#" autoFocus
+                      style={{ width: 120, marginTop: 4, textAlign: 'right', fontWeight: 700, fontSize: '1rem' }}
+                    />
+                  )}
+                </div>
+              </div>
+
               <div className="form-group">
                 <label className="form-label">Client Purchase Order Number</label>
                 <input
@@ -2507,6 +2979,34 @@ function EstimateDetailsPage() {
                   </p>
                 </div>
               )}
+
+              {/* Material Received Toggle */}
+              <div style={{ marginTop: 16 }}>
+                <label className="form-label" style={{ marginBottom: 8, display: 'block' }}>Has the material been received?</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" style={{
+                    flex: 1, padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: '0.95rem', cursor: 'pointer',
+                    border: `2px solid ${convertData.materialReceived ? '#2e7d32' : '#ccc'}`,
+                    background: convertData.materialReceived ? '#e8f5e9' : '#fff',
+                    color: convertData.materialReceived ? '#2e7d32' : '#666'
+                  }} onClick={() => setConvertData({ ...convertData, materialReceived: true })}>
+                    ✓ Yes — Material Received
+                  </button>
+                  <button type="button" style={{
+                    flex: 1, padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: '0.95rem', cursor: 'pointer',
+                    border: `2px solid ${!convertData.materialReceived ? '#e65100' : '#ccc'}`,
+                    background: !convertData.materialReceived ? '#fff3e0' : '#fff',
+                    color: !convertData.materialReceived ? '#e65100' : '#666'
+                  }} onClick={() => setConvertData({ ...convertData, materialReceived: false })}>
+                    ✗ No — Waiting for Material
+                  </button>
+                </div>
+                <div style={{ fontSize: '0.8rem', color: '#888', marginTop: 4 }}>
+                  {convertData.materialReceived
+                    ? 'Work order will be set to "Received" status'
+                    : 'Work order will be set to "Waiting for Materials" status'}
+                </div>
+              </div>
             </div>
 
             <div className="modal-footer">
@@ -2518,20 +3018,12 @@ function EstimateDetailsPage() {
                 style={{ background: '#2e7d32', color: 'white' }}
               >
                 <Package size={18} />
-                {converting ? 'Converting...' : 'Create Work Order'}
+                {converting ? 'Converting...' : `Create Work Order (DR-${useCustomDR ? (customDR || '?') : (nextDR || '...')})`}
               </button>
             </div>
           </div>
         </div>
       )}
-
-      {/* Import Parts Modal */}
-      <ImportPartsModal
-        isOpen={showImportModal}
-        onClose={() => setShowImportModal(false)}
-        onImportParts={handleImportParts}
-        estimateId={id}
-      />
     </div>
   );
 }

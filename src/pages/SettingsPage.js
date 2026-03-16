@@ -92,7 +92,7 @@ function SettingsPage() {
         <div 
           className="card" 
           style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/settings/locations')}
+          onClick={() => navigate('/admin/settings/locations')}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
@@ -120,7 +120,7 @@ function SettingsPage() {
         <div 
           className="card" 
           style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/settings/section-sizes')}
+          onClick={() => navigate('/admin/settings/section-sizes')}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>

@@ -3,6 +3,7 @@ import RollToOverride from './RollToOverride';
 import { Upload } from 'lucide-react';
 import { searchVendors, getSettings, createVendor } from '../services/api';
 import { useSectionSizes } from '../hooks/useSectionSizes';
+import HeatNumberInput from './HeatNumberInput';
 
 const THICKNESS_OPTIONS = [
   '24 ga', '20 ga', '16 ga', '14 ga', '12 ga', '11 ga', '10 ga',
@@ -253,6 +254,12 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
     }
     lines.push(rollLine);
     
+    // Orientation option
+    if (partData._orientationOption) {
+      const combo = partData.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID';
+      lines.push(`Orientation: ${combo} Option ${partData._orientationOption}`);
+    }
+    
     if (riseCalc) {
       lines.push(`Chord: ${riseCalc.chord}" Rise: ${riseCalc.rise.toFixed(4)}"`);
     }
@@ -267,7 +274,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
     }
     
     return lines.join('\n');
-  }, [rollValue, rollMeasureType, rollMeasurePoint, partData.rollType, isUnequalLegs, partData._legOrientation, riseCalc, clDiameter, completeRings, ringCalc, ringsNeeded]);
+  }, [rollValue, rollMeasureType, rollMeasurePoint, partData.rollType, isUnequalLegs, partData._legOrientation, partData._orientationOption, riseCalc, clDiameter, completeRings, ringCalc, ringsNeeded]);
 
   // Auto-update material description + sectionSize
   useEffect(() => {
@@ -407,7 +414,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
           </div>
           <div className="form-group">
             <label className="form-label">Measured At</label>
-            <select className="form-select" disabled={!!rollToMethod} style={rollToMethod ? { background: '#f0f0f0', color: '#999' } : {}} value={rollMeasurePoint} onChange={(e) => setRollMeasurePoint(e.target.value)}>
+            <select className="form-select" disabled={!!rollToMethod} style={rollToMethod ? { background: '#f0f0f0', color: '#999' } : {}} value={rollMeasurePoint} onChange={(e) => { setRollMeasurePoint(e.target.value); setPartData(prev => ({ ...prev, _orientationOption: '' })); }}>
               <option value="inside">Inside</option>
               <option value="outside">Outside</option>
             </select>
@@ -466,7 +473,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
                 color: partData.rollType === 'easy_way' ? '#2e7d32' : '#666',
                 cursor: 'pointer'
               }}
-              onClick={() => setPartData({ ...partData, rollType: 'easy_way', _legOrientation: '' })}
+              onClick={() => setPartData({ ...partData, rollType: 'easy_way', _legOrientation: '', _orientationOption: '' })}
             >
               Easy Way (EW)
             </button>
@@ -478,12 +485,64 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
                 color: partData.rollType === 'hard_way' ? '#c62828' : '#666',
                 cursor: 'pointer'
               }}
-              onClick={() => setPartData({ ...partData, rollType: 'hard_way', _legOrientation: '' })}
+              onClick={() => setPartData({ ...partData, rollType: 'hard_way', _legOrientation: '', _orientationOption: '' })}
             >
               Hard Way (HW)
             </button>
           </div>
         </div>
+
+        {/* Measurement Orientation Diagram — EW+OD or HW+ID */}
+        {partData.rollType && rollMeasurePoint && !rollToMethod && (
+          (partData.rollType === 'easy_way' && rollMeasurePoint === 'outside') ||
+          (partData.rollType === 'hard_way' && rollMeasurePoint === 'inside')
+        ) && (
+          <div style={{
+            padding: 14, borderRadius: 8, marginBottom: 12,
+            background: partData._orientationOption ? '#e8f5e9' : '#fff3e0',
+            border: `2px solid ${partData._orientationOption ? '#4caf50' : '#ff9800'}`
+          }}>
+            <label className="form-label" style={{ 
+              color: partData._orientationOption ? '#2e7d32' : '#e65100', 
+              fontWeight: 700, marginBottom: 10, display: 'block' 
+            }}>
+              {partData._orientationOption ? '✅' : '⚠️'} Which orientation? Select where the {rollMeasurePoint === 'outside' ? 'OD' : 'ID'} is measured from:
+            </label>
+            <div style={{ display: 'flex', gap: 12 }}>
+              {[1, 2].map(opt => {
+                const imgFile = partData.rollType === 'easy_way' 
+                  ? `EWODOp${opt}.png` 
+                  : `HWIDOp${opt}.png`;
+                const isSelected = partData._orientationOption === String(opt);
+                return (
+                  <div key={opt}
+                    onClick={() => setPartData({ ...partData, _orientationOption: String(opt) })}
+                    style={{
+                      flex: 1, cursor: 'pointer', borderRadius: 8, overflow: 'hidden',
+                      border: `3px solid ${isSelected ? '#2e7d32' : '#ccc'}`,
+                      background: isSelected ? '#e8f5e9' : '#fff',
+                      boxShadow: isSelected ? '0 0 8px rgba(46,125,50,0.3)' : 'none',
+                      transition: 'all 0.15s'
+                    }}>
+                    <img 
+                      src={`/images/angle-orientation/${imgFile}`} 
+                      alt={`Option ${opt}`}
+                      style={{ width: '100%', display: 'block' }}
+                    />
+                    <div style={{ 
+                      padding: '8px 0', textAlign: 'center', fontWeight: 700,
+                      fontSize: '0.9rem',
+                      color: isSelected ? '#2e7d32' : '#666',
+                      background: isSelected ? '#c8e6c9' : '#f5f5f5'
+                    }}>
+                      {isSelected ? '✓ ' : ''}Option {opt}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Leg Orientation - Only show for unequal legs */}
         {isUnequalLegs && partData.rollType && (
@@ -686,23 +745,25 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
             <select className="form-select" value={partData.materialSource || 'customer_supplied'} onChange={(e) => setPartData({ ...partData, materialSource: e.target.value })}>
               <option value="customer_supplied">Client Supplies</option>
               <option value="we_order">We Order</option>
+              <option value="in_stock">In Stock (We Supply)</option>
             </select>
           </div>
         </div>
 
         {/* Vendor Selector */}
         {partData.materialSource === 'we_order' && (
+          <>
           <div className="form-group" style={{ position: 'relative', marginTop: 8 }}>
             <label className="form-label">Vendor</label>
             <input className="form-input"
-              value={partData._vendorSearch !== undefined ? partData._vendorSearch : (partData.vendor?.name || partData.supplierName || '')}
+              value={partData._vendorSearch !== undefined ? partData._vendorSearch : (partData.supplierName || partData.vendor?.name || '')}
               onChange={async (e) => {
                 const value = e.target.value;
                 setPartData({ ...partData, _vendorSearch: value });
                 if (value.length >= 1) {
                   try { const res = await searchVendors(value); setVendorSuggestions(res.data.data || []); setShowVendorSuggestions(true); } catch { setVendorSuggestions([]); }
                 } else {
-                  setPartData({ ...partData, _vendorSearch: value, vendorId: null, supplierName: '' }); setVendorSuggestions([]); setShowVendorSuggestions(false);
+                  setPartData({ ...partData, _vendorSearch: value, vendorId: null, supplierName: '', vendor: null }); setVendorSuggestions([]); setShowVendorSuggestions(false);
                 }
               }}
               onFocus={async () => { try { const res = await searchVendors(''); setVendorSuggestions(res.data.data || []); setShowVendorSuggestions(true); } catch {} }}
@@ -713,7 +774,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
               <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: 'white', border: '1px solid #ddd', borderRadius: 4, maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
                 {vendorSuggestions.map(v => (
                   <div key={v.id} style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #eee' }}
-                    onMouseDown={() => { setPartData({ ...partData, vendorId: v.id, supplierName: v.name, _vendorSearch: undefined }); setShowVendorSuggestions(false); }}>
+                    onMouseDown={() => { setPartData({ ...partData, vendorId: v.id, supplierName: v.name, vendor: null, _vendorSearch: undefined }); setShowVendorSuggestions(false); }}>
                     <strong>{v.name}</strong>
                     {v.contactPhone && <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: 8 }}>{v.contactPhone}</span>}
                   </div>
@@ -723,7 +784,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
                     onMouseDown={async () => {
                       try {
                         const resp = await createVendor({ name: partData._vendorSearch });
-                        if (resp.data.data) { setPartData({ ...partData, vendorId: resp.data.data.id, supplierName: resp.data.data.name, _vendorSearch: undefined }); showMessage(`Vendor "${resp.data.data.name}" created`); }
+                        if (resp.data.data) { setPartData({ ...partData, vendorId: resp.data.data.id, supplierName: resp.data.data.name, vendor: null, _vendorSearch: undefined }); showMessage(`Vendor "${resp.data.data.name}" created`); }
                       } catch { setError('Failed to create vendor'); }
                       setShowVendorSuggestions(false);
                     }}>
@@ -733,6 +794,14 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
               </div>
             )}
           </div>
+        
+          <div className="form-group" style={{ marginTop: 8 }}>
+            <label className="form-label">Vendor Estimate #</label>
+            <input className="form-input" value={partData.vendorEstimateNumber || ''}
+              onChange={(e) => setPartData({ ...partData, vendorEstimateNumber: e.target.value })}
+              placeholder="Optional - vendor's quote/estimate number" />
+          </div>
+          </>
         )}
 
         {/* Material Description for email */}
@@ -810,10 +879,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
             <label className="form-label">Client Part Number</label>
             <input type="text" className="form-input" value={partData.clientPartNumber || ''} onChange={(e) => setPartData({ ...partData, clientPartNumber: e.target.value })} placeholder="Optional" />
           </div>
-          <div className="form-group">
-            <label className="form-label">Heat Number</label>
-            <input type="text" className="form-input" value={partData.heatNumber || ''} onChange={(e) => setPartData({ ...partData, heatNumber: e.target.value })} placeholder="Optional" />
-          </div>
+          <HeatNumberInput partData={partData} setPartData={setPartData} />
         </div>
       </div>
     </>

@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Calendar, Clock, Search, 
-  AlertTriangle, Filter
+  AlertTriangle, Filter, Edit2, Check, X
 } from 'lucide-react';
-import { getWorkOrders } from '../services/api';
+import { getWorkOrders, updateWorkOrder } from '../services/api';
 
 // Match inventory page statuses exactly
 const STATUSES = {
@@ -15,7 +15,6 @@ const STATUSES = {
   processing: { label: 'Processing', color: '#0288d1', bg: '#e1f5fe' },
   stored: { label: 'Stored', color: '#388e3c', bg: '#e8f5e9' },
   shipped: { label: 'Shipped', color: '#7b1fa2', bg: '#f3e5f5' },
-  picked_up: { label: 'Picked Up', color: '#7b1fa2', bg: '#f3e5f5' },
   archived: { label: 'Archived', color: '#616161', bg: '#eeeeee' },
   // Legacy mappings
   draft: { label: 'Received', color: '#1976d2', bg: '#e3f2fd' },
@@ -24,7 +23,7 @@ const STATUSES = {
 };
 
 // Statuses that mean the job is done — hide from schedule
-const DONE_STATUSES = ['stored', 'completed', 'shipped', 'picked_up', 'archived'];
+const DONE_STATUSES = ['stored', 'completed', 'shipped', 'archived'];
 
 // Active statuses for filter dropdown
 const ACTIVE_STATUSES = [
@@ -42,11 +41,25 @@ function SchedulingPage() {
   const [searchQuery, setSearchQuery] = useState('');
   
   const [sortBy, setSortBy] = useState(() => {
-    return localStorage.getItem('scheduling_sortBy') || 'promised_asc';
+    return localStorage.getItem('scheduling_sortBy') || 'smart';
   });
   const [statusFilter, setStatusFilter] = useState(() => {
     return localStorage.getItem('scheduling_statusFilter') || 'all';
   });
+  const [editingDate, setEditingDate] = useState(null); // { orderId, field, value }
+
+  const handleDateSave = async () => {
+    if (!editingDate) return;
+    try {
+      await updateWorkOrder(editingDate.orderId, { [editingDate.field]: editingDate.value || null });
+      setWorkOrders(prev => prev.map(o => 
+        o.id === editingDate.orderId ? { ...o, [editingDate.field]: editingDate.value || null } : o
+      ));
+      setEditingDate(null);
+    } catch (err) {
+      console.error('Failed to save date:', err);
+    }
+  };
 
   useEffect(() => {
     localStorage.setItem('scheduling_sortBy', sortBy);
@@ -58,25 +71,40 @@ function SchedulingPage() {
 
   useEffect(() => {
     loadWorkOrders();
+    const interval = setInterval(() => loadWorkOrders(true), 30000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     filterAndSort();
   }, [workOrders, searchQuery, sortBy, statusFilter]);
 
-  const loadWorkOrders = async () => {
+  const loadWorkOrders = async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const response = await getWorkOrders();
       const all = response.data.data || [];
-      // Filter out done statuses
       const active = all.filter(o => !DONE_STATUSES.includes(o.status));
+      
+      // Auto-set high priority for orders received > 7 days ago that are still normal
+      const now = new Date();
+      const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+      active.forEach(order => {
+        const received = new Date(order.receivedAt || order.createdAt);
+        const age = now - received;
+        if (age > sevenDaysMs && (!order.priority || order.priority === 'normal')) {
+          // Fire and forget — update in background
+          order.priority = 'high';
+          updateWorkOrder(order.id, { priority: 'high' }).catch(() => {});
+        }
+      });
+      
       setWorkOrders(active);
     } catch (err) {
-      setError('Failed to load work orders');
+      if (!silent) setError('Failed to load work orders');
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -114,6 +142,24 @@ function SchedulingPage() {
       const bRush = b.parts?.some(p => p.partType === 'rush_service');
       if (aRush && !bRush) return -1;
       if (!aRush && bRush) return 1;
+
+      if (sortBy === 'smart') {
+        // Priority sort: urgent → high → normal/low, then by promised date, then by age
+        const priorityOrder = { urgent: 0, high: 1, normal: 2, low: 3 };
+        const aPri = priorityOrder[a.priority] ?? 2;
+        const bPri = priorityOrder[b.priority] ?? 2;
+        if (aPri !== bPri) return aPri - bPri;
+
+        // Within same priority: earliest promise date first
+        const aPromised = a.promisedDate ? new Date(a.promisedDate).getTime() : Infinity;
+        const bPromised = b.promisedDate ? new Date(b.promisedDate).getTime() : Infinity;
+        if (aPromised !== bPromised) return aPromised - bPromised;
+
+        // Same promise date or both no promise: oldest received first
+        const aAge = new Date(a.receivedAt || a.createdAt || 0).getTime();
+        const bAge = new Date(b.receivedAt || b.createdAt || 0).getTime();
+        return aAge - bAge;
+      }
 
       switch (sortBy) {
         case 'name_asc':
@@ -158,7 +204,8 @@ function SchedulingPage() {
 
   const formatDate = (dateString) => {
     if (!dateString) return '—';
-    return new Date(dateString).toLocaleDateString('en-US', {
+    const d = typeof dateString === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateString) ? dateString + 'T12:00:00' : dateString;
+    return new Date(d).toLocaleDateString('en-US', {
       month: 'short', day: 'numeric', year: 'numeric',
     });
   };
@@ -215,6 +262,8 @@ function SchedulingPage() {
     getDateStatus(o.requestedDueDate) === 'urgent'
   ).length;
   const rushCount = workOrders.filter(o => o.parts?.some(p => p.partType === 'rush_service')).length;
+  const urgentPriorityCount = workOrders.filter(o => o.priority === 'urgent' && !o.parts?.some(p => p.partType === 'rush_service')).length;
+  const highPriorityCount = workOrders.filter(o => o.priority === 'high').length;
 
   if (loading) {
     return (
@@ -323,6 +372,7 @@ function SchedulingPage() {
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value)}
           >
+            <option value="smart">🎯 Smart (Priority → Promised → Age)</option>
             <optgroup label="By DR Number">
               <option value="dr_desc">DR# (Newest)</option>
               <option value="dr_asc">DR# (Oldest)</option>
@@ -359,7 +409,7 @@ function SchedulingPage() {
           {/* Table Header */}
           <div style={{ 
             display: 'grid', 
-            gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 140px',
+            gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 100px 140px',
             background: '#f5f5f5',
             padding: '12px 16px',
             fontWeight: 600,
@@ -373,6 +423,7 @@ function SchedulingPage() {
             <div>Received</div>
             <div>Requested</div>
             <div>Promised</div>
+            <div>Progress</div>
             <div>Status</div>
           </div>
 
@@ -382,28 +433,43 @@ function SchedulingPage() {
             const requestedStatus = getDateStatus(order.requestedDueDate);
             const statusCfg = getStatusConfig(order.status);
             const isRush = order.parts?.some(p => p.partType === 'rush_service');
+            const priority = order.priority || 'normal';
+
+            // Row background: rush=red, urgent=orange, high=yellow, normal=alternating
+            const rowBg = isRush ? '#ffebee' 
+              : priority === 'urgent' ? '#fff3e0'
+              : priority === 'high' ? '#fffde7'
+              : (index % 2 === 0 ? 'white' : '#fafafa');
+            const rowHoverBg = isRush ? '#ffcdd2'
+              : priority === 'urgent' ? '#ffe0b2'
+              : priority === 'high' ? '#fff9c4'
+              : '#f0f7ff';
+            const rowBorder = isRush ? '4px solid #c62828'
+              : priority === 'urgent' ? '4px solid #e65100'
+              : priority === 'high' ? '4px solid #f9a825'
+              : undefined;
 
             return (
               <div key={order.id}>
                 <div
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 140px',
+                    gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 100px 140px',
                     padding: '16px',
                     borderBottom: isRush ? '2px solid #ef5350' : '1px solid #eee',
                     cursor: 'pointer',
-                    background: isRush ? '#ffebee' : (index % 2 === 0 ? 'white' : '#fafafa'),
+                    background: rowBg,
                     transition: 'background 0.2s',
                     alignItems: 'center',
-                    borderLeft: isRush ? '4px solid #c62828' : undefined
+                    borderLeft: rowBorder
                   }}
                   onClick={() => navigate(`/workorders/${order.id}`)}
-                  onMouseEnter={(e) => e.currentTarget.style.background = isRush ? '#ffcdd2' : '#f0f7ff'}
-                  onMouseLeave={(e) => e.currentTarget.style.background = isRush ? '#ffebee' : (index % 2 === 0 ? 'white' : '#fafafa')}
+                  onMouseEnter={(e) => e.currentTarget.style.background = rowHoverBg}
+                  onMouseLeave={(e) => e.currentTarget.style.background = rowBg}
                 >
                   {/* DR# / Client */}
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
                       {order.drNumber ? (
                         <span style={{ 
                           fontWeight: 700, 
@@ -423,6 +489,22 @@ function SchedulingPage() {
                           borderRadius: 4, fontSize: '0.7rem', fontWeight: 700
                         }}>
                           🚨 RUSH
+                        </span>
+                      )}
+                      {!isRush && priority === 'urgent' && (
+                        <span style={{
+                          background: '#e65100', color: 'white', padding: '2px 8px',
+                          borderRadius: 4, fontSize: '0.7rem', fontWeight: 700
+                        }}>
+                          🔴 URGENT
+                        </span>
+                      )}
+                      {!isRush && priority === 'high' && (
+                        <span style={{
+                          background: '#f9a825', color: '#333', padding: '2px 8px',
+                          borderRadius: 4, fontSize: '0.7rem', fontWeight: 700
+                        }}>
+                          ⚡ HIGH
                         </span>
                       )}
                     </div>
@@ -451,55 +533,99 @@ function SchedulingPage() {
                     {formatDate(order.receivedAt || order.createdAt)}
                   </div>
 
-                  {/* Requested Date */}
-                  <div>
-                    {order.requestedDueDate ? (
-                      <div style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '4px 8px',
-                        borderRadius: 4,
-                        fontSize: '0.85rem',
-                        ...getDateBadgeStyle(requestedStatus)
-                      }}>
-                        {requestedStatus === 'overdue' && <AlertTriangle size={14} />}
-                        {formatDate(order.requestedDueDate)}
+                  {/* Requested Date - click to edit */}
+                  <div onClick={(e) => e.stopPropagation()}>
+                    {editingDate?.orderId === order.id && editingDate?.field === 'requestedDueDate' ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <input type="date" value={editingDate.value || ''} 
+                          onChange={(e) => setEditingDate({ ...editingDate, value: e.target.value })}
+                          autoFocus
+                          style={{ fontSize: '0.8rem', padding: '3px 6px', border: '1px solid #1976d2', borderRadius: 4, width: 130 }}
+                        />
+                        <button onClick={handleDateSave} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#4caf50' }}><Check size={14} /></button>
+                        <button onClick={() => setEditingDate(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#999' }}><X size={14} /></button>
                       </div>
                     ) : (
-                      <span style={{ color: '#ccc' }}>—</span>
+                      <div style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        onClick={() => setEditingDate({ orderId: order.id, field: 'requestedDueDate', value: order.requestedDueDate || '' })}
+                        title="Click to edit"
+                      >
+                        {order.requestedDueDate ? (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 6,
+                            padding: '4px 8px', borderRadius: 4, fontSize: '0.85rem',
+                            ...getDateBadgeStyle(requestedStatus)
+                          }}>
+                            {requestedStatus === 'overdue' && <AlertTriangle size={14} />}
+                            {formatDate(order.requestedDueDate)}
+                          </span>
+                        ) : (
+                          <span style={{ color: '#bbb', fontSize: '0.8rem' }}>+ Add</span>
+                        )}
+                      </div>
                     )}
                   </div>
 
-                  {/* Promised Date */}
-                  <div>
-                    {order.promisedDate ? (
-                      <div style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '4px 8px',
-                        borderRadius: 4,
-                        fontSize: '0.85rem',
-                        fontWeight: 500,
-                        ...getDateBadgeStyle(promisedStatus)
-                      }}>
-                        {promisedStatus === 'overdue' && <AlertTriangle size={14} />}
-                        {promisedStatus === 'today' && <Clock size={14} />}
-                        {formatDate(order.promisedDate)}
-                        {getDaysUntil(order.promisedDate) !== null && (
-                          <span style={{ fontSize: '0.7rem', opacity: 0.8 }}>
-                            ({getDaysUntil(order.promisedDate) === 0 
-                              ? 'Today' 
-                              : getDaysUntil(order.promisedDate) < 0 
-                                ? `${Math.abs(getDaysUntil(order.promisedDate))}d late`
-                                : `${getDaysUntil(order.promisedDate)}d`})
-                          </span>
-                        )}
+                  {/* Promised Date - click to edit */}
+                  <div onClick={(e) => e.stopPropagation()}>
+                    {editingDate?.orderId === order.id && editingDate?.field === 'promisedDate' ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <input type="date" value={editingDate.value || ''} 
+                          onChange={(e) => setEditingDate({ ...editingDate, value: e.target.value })}
+                          autoFocus
+                          style={{ fontSize: '0.8rem', padding: '3px 6px', border: '1px solid #1976d2', borderRadius: 4, width: 130 }}
+                        />
+                        <button onClick={handleDateSave} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#4caf50' }}><Check size={14} /></button>
+                        <button onClick={() => setEditingDate(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#999' }}><X size={14} /></button>
                       </div>
                     ) : (
-                      <span style={{ color: '#ccc' }}>—</span>
+                      <div style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        onClick={() => setEditingDate({ orderId: order.id, field: 'promisedDate', value: order.promisedDate || '' })}
+                        title="Click to edit"
+                      >
+                        {order.promisedDate ? (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 6,
+                            padding: '4px 8px', borderRadius: 4, fontSize: '0.85rem', fontWeight: 500,
+                            ...getDateBadgeStyle(promisedStatus)
+                          }}>
+                            {promisedStatus === 'overdue' && <AlertTriangle size={14} />}
+                            {promisedStatus === 'today' && <Clock size={14} />}
+                            {formatDate(order.promisedDate)}
+                            {getDaysUntil(order.promisedDate) !== null && (
+                              <span style={{ fontSize: '0.7rem', opacity: 0.8 }}>
+                                ({getDaysUntil(order.promisedDate) === 0 
+                                  ? 'Today' 
+                                  : getDaysUntil(order.promisedDate) < 0 
+                                    ? `${Math.abs(getDaysUntil(order.promisedDate))}d late`
+                                    : `${getDaysUntil(order.promisedDate)}d`})
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span style={{ color: '#bbb', fontSize: '0.8rem' }}>+ Add</span>
+                        )}
+                      </div>
                     )}
+                  </div>
+
+                  {/* Progress */}
+                  <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                    {(() => {
+                      const total = order.parts?.length || 0;
+                      const done = (order.parts || []).filter(p => p.status === 'completed').length;
+                      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+                      return total > 0 ? (
+                        <>
+                          <div style={{ fontSize: '0.75rem', color: pct === 100 ? '#2e7d32' : '#666', marginBottom: 2, fontWeight: pct === 100 ? 600 : 400 }}>
+                            {done}/{total}
+                          </div>
+                          <div style={{ height: 4, background: '#e0e0e0', borderRadius: 2, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${pct}%`, background: pct === 100 ? '#4caf50' : '#1976d2', borderRadius: 2, transition: 'width 0.5s ease' }} />
+                          </div>
+                        </>
+                      ) : <span style={{ color: '#ccc', fontSize: '0.75rem' }}>—</span>;
+                    })()}
                   </div>
 
                   {/* Status */}

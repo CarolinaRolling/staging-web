@@ -5,7 +5,7 @@ import {
   Shield, User, Clock, ChevronLeft, ChevronRight, Key, Check, AlertTriangle, RefreshCw,
   Mail, Send, DollarSign
 } from 'lucide-react';
-import { getUsers, createUser, updateUser, deleteUser, getActivityLogs, getScheduleEmailSettings, updateScheduleEmailSettings, sendScheduleEmailNow, getSettings, updateSettings, startBatchVerification, getBatchStatus, downloadResaleReport } from '../services/api';
+import { getUsers, createUser, updateUser, deleteUser, getActivityLogs, getScheduleEmailSettings, updateScheduleEmailSettings, sendScheduleEmailNow, getSettings, updateSettings, getPrinterConfig, updatePrinterConfig, startBatchVerification, getBatchStatus, downloadResaleReport, getApiKeys, getApiKeySetupQR, createApiKey, updateApiKey, revokeApiKey, deleteApiKeyPermanent, getApprovedIPs, updateApprovedIPs, setup2FA, verify2FA, disable2FA, get2FAStatus } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 // Global error log for NAS uploads
@@ -26,10 +26,17 @@ export const logNasError = (error, details = {}) => {
   console.error('NAS Error logged:', entry);
 };
 
-function AdminPage() {
+function AdminPage({ section = 'users-logs' }) {
   const navigate = useNavigate();
   const { user: currentUser, isAdmin } = useAuth();
-  const [activeTab, setActiveTab] = useState('tax');
+  
+  // Tab groups by section
+  const SECTION_TABS = {
+    'users-logs': ['users', 'logs', 'schedule', 'apikeys', 'system'],
+    'shop-config': ['tax', 'minimums', 'rolllimits', 'mandreldies', 'grades', 'weldrates', 'printer']
+  };
+  const allowedTabs = SECTION_TABS[section] || SECTION_TABS['users-logs'];
+  const [activeTab, setActiveTab] = useState(allowedTabs[0]);
   const [users, setUsers] = useState([]);
   const [logs, setLogs] = useState([]);
   const [logsTotal, setLogsTotal] = useState(0);
@@ -94,6 +101,29 @@ function AdminPage() {
   const [batchStatus, setBatchStatus] = useState(null);
   const [batchPolling, setBatchPolling] = useState(false);
 
+  // API Keys
+  const [apiKeys, setApiKeys] = useState([]);
+  const [showNewApiKeyModal, setShowNewApiKeyModal] = useState(false);
+  const [newApiKey, setNewApiKey] = useState({ name: '', clientName: '', permissions: 'read', allowedIPs: '', operatorName: '', deviceName: '' });
+  const [createdApiKey, setCreatedApiKey] = useState(null); // holds key after creation (only shown once)
+  const [apiKeysLoading, setApiKeysLoading] = useState(false);
+  const [editingApiKey, setEditingApiKey] = useState(null);
+  const [editApiKeyData, setEditApiKeyData] = useState({});
+  const [approvedIPs, setApprovedIPs] = useState([]);
+  const [newIP, setNewIP] = useState('');
+  const [printerConfig, setPrinterConfig] = useState({ qrPrinterIp: '', qrLabelType: 'CONTINUOUS_29', qrLabelLengthMm: 25, partPrinterIp: '', partLabelType: 'DK_11202_62x100' });
+
+  // Two-Factor Auth
+  const [twoFAState, setTwoFAState] = useState({ enabled: false, setupData: null, verifyCode: '', disablePassword: '' });
+
+  // Reset tab when section changes
+  useEffect(() => {
+    const tabs = SECTION_TABS[section] || SECTION_TABS['users-logs'];
+    if (!tabs.includes(activeTab)) {
+      setActiveTab(tabs[0]);
+    }
+  }, [section]);
+
   useEffect(() => {
     if (!isAdmin()) {
       navigate('/inventory');
@@ -120,9 +150,14 @@ function AdminPage() {
       loadWeldRates();
     } else if (activeTab === 'system') {
       setSystemLogs([...window.nasErrorLog]);
+      get2FAStatus().then(resp => {
+        setTwoFAState(prev => ({ ...prev, enabled: resp.data.data.enabled }));
+      }).catch(() => {});
       setLoading(false);
-    } else if (activeTab === 'permits') {
-      loadBatchStatus();
+    } else if (activeTab === 'apikeys') {
+      loadApiKeys();
+    } else if (activeTab === 'printer') {
+      loadPrinterConfig();
     }
   }, [activeTab, logsPage]);
 
@@ -442,6 +477,163 @@ function AdminPage() {
     setSystemLogs([]);
   };
 
+  // API Key management
+  const loadApiKeys = async () => {
+    try {
+      setLoading(true);
+      const [keysRes, ipsRes] = await Promise.all([getApiKeys(), getApprovedIPs()]);
+      setApiKeys(keysRes.data.data || []);
+      setApprovedIPs(ipsRes.data.data || []);
+    } catch (err) {
+      setError('Failed to load API keys');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddIP = async () => {
+    const ip = newIP.trim();
+    if (!ip) return;
+    if (approvedIPs.includes(ip)) { setError('IP already in list'); return; }
+    try {
+      const updated = [...approvedIPs, ip];
+      await updateApprovedIPs(updated);
+      setApprovedIPs(updated);
+      setNewIP('');
+      setSuccess(`Added ${ip} to approved IPs`);
+    } catch (err) {
+      setError('Failed to update approved IPs');
+    }
+  };
+
+  const handleRemoveIP = async (ip) => {
+    try {
+      const updated = approvedIPs.filter(i => i !== ip);
+      await updateApprovedIPs(updated);
+      setApprovedIPs(updated);
+      setSuccess(`Removed ${ip} from approved IPs`);
+    } catch (err) {
+      setError('Failed to update approved IPs');
+    }
+  };
+
+  const handleSaveEditApiKey = async () => {
+    try {
+      setSaving(true);
+      await updateApiKey(editingApiKey.id, editApiKeyData);
+      setSuccess(`API key "${editApiKeyData.name}" updated`);
+      setEditingApiKey(null);
+      loadApiKeys();
+    } catch (err) {
+      setError('Failed to update API key');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadPrinterConfig = async () => {
+    try {
+      setLoading(true);
+      const response = await getPrinterConfig();
+      setPrinterConfig(response.data.data || { qrPrinterIp: '', qrLabelType: 'CONTINUOUS_29', qrLabelLengthMm: 25, partPrinterIp: '', partLabelType: 'DK_11202_62x100' });
+    } catch (err) {
+      setPrinterConfig({ qrPrinterIp: '', qrLabelType: 'CONTINUOUS_29', qrLabelLengthMm: 25, partPrinterIp: '', partLabelType: 'DK_11202_62x100' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSavePrinterConfig = async () => {
+    try {
+      setSaving(true);
+      await updatePrinterConfig(printerConfig);
+      setSuccess('Printer configuration saved — tablets will pick it up on next refresh');
+    } catch (err) {
+      setError('Failed to save printer config');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCreateApiKey = async () => {
+    if (!newApiKey.name.trim()) {
+      setError('API key name is required');
+      return;
+    }
+    try {
+      setSaving(true);
+      const response = await createApiKey({
+        name: newApiKey.name.trim(),
+        clientName: newApiKey.clientName.trim() || null,
+        permissions: newApiKey.permissions,
+        allowedIPs: newApiKey.allowedIPs.trim() || null,
+        operatorName: newApiKey.operatorName.trim() || null,
+        deviceName: newApiKey.deviceName.trim() || null
+      });
+      setCreatedApiKey(response.data.data);
+      setNewApiKey({ name: '', clientName: '', permissions: 'read', allowedIPs: '', operatorName: '', deviceName: '' });
+      loadApiKeys();
+    } catch (err) {
+      setError('Failed to create API key');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRevokeApiKey = async (id, name) => {
+    if (!window.confirm(`Revoke API key "${name}"? Any apps using this key will lose access.`)) return;
+    try {
+      await revokeApiKey(id);
+      setSuccess(`API key "${name}" revoked`);
+      loadApiKeys();
+    } catch (err) {
+      setError('Failed to revoke API key');
+    }
+  };
+
+  const handleShowSetupQR = async (keyId, keyName) => {
+    try {
+      const response = await getApiKeySetupQR(keyId);
+      const { qrPayload, deviceName } = response.data.data;
+      
+      const w = window.open('', '_blank', 'width=520,height=640');
+      w.document.write(`<!DOCTYPE html><html><head><title>Setup QR - ${deviceName}</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+        <style>
+          body { font-family: Arial, sans-serif; text-align: center; padding: 24px; margin: 0; background: #f5f5f5; }
+          .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); max-width: 460px; margin: 0 auto; }
+          h2 { color: #1976d2; margin: 0 0 4px; font-size: 18px; }
+          .device { color: #333; font-size: 14px; margin-bottom: 16px; }
+          #qrcode { display: flex; justify-content: center; margin: 16px 0; }
+          .instructions { font-size: 12px; color: #666; line-height: 1.6; text-align: left; background: #f0f7ff; padding: 12px; border-radius: 8px; margin-top: 16px; }
+          .instructions strong { color: #1565c0; }
+        </style></head><body>
+        <div class="card">
+          <h2>📱 Tablet Setup</h2>
+          <div class="device">${deviceName}</div>
+          <div id="qrcode"></div>
+          <div class="instructions">
+            <strong>How to use:</strong><br/>
+            1. Open the Scanner on the tablet<br/>
+            2. Point camera at this QR code<br/>
+            3. Tap "Restart App" when prompted<br/>
+            4. Tablet is configured!
+          </div>
+        </div>
+        <script>
+          new QRCode(document.getElementById("qrcode"), {
+            text: ${JSON.stringify(qrPayload)},
+            width: 380, height: 380,
+            correctLevel: QRCode.CorrectLevel.L
+          });
+        <\/script>
+      </body></html>`);
+      w.document.close();
+    } catch (err) {
+      setError('Failed to generate setup QR');
+    }
+  };
+
   const loadUsers = async () => {
     try {
       setLoading(true);
@@ -607,140 +799,49 @@ function AdminPage() {
   return (
     <div>
       <div className="page-header">
-        <h1 className="page-title">Admin Panel</h1>
+        <h1 className="page-title">{section === 'shop-config' ? '🔧 Shop Configuration' : '👥 Users & Logs'}</h1>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      {/* Quick Links */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 12 }}>Quick Links</h3>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn btn-outline" onClick={() => navigate('/admin/clients-vendors')}>
-            👥 Clients & Vendors
-          </button>
-          <button className="btn btn-outline" onClick={() => navigate('/admin/dr-numbers')}>
-            📋 DR Numbers
-          </button>
-          <button className="btn btn-outline" onClick={() => navigate('/admin/po-numbers')}>
-            🔢 PO Numbers
-          </button>
-          <button className="btn btn-outline" onClick={() => navigate('/admin/email')}>
-            📧 Email Settings
-          </button>
-          <button className="btn btn-outline" onClick={() => navigate('/admin/shipments')}>
-            📦 Shipments
-          </button>
-        </div>
-      </div>
-
-      {/* Tabs */}
+      {/* Tabs based on section */}
       <div className="tabs" style={{ flexWrap: 'wrap', gap: '2px 0' }}>
-        {/* ── SHOP CONFIGURATION ── */}
-        <span style={{ fontSize: '0.65rem', color: '#999', textTransform: 'uppercase', letterSpacing: 1, padding: '8px 10px 4px', fontWeight: 700, userSelect: 'none' }}>Shop Config</span>
-        <button 
-          className={`tab ${activeTab === 'tax' ? 'active' : ''}`}
-          onClick={() => setActiveTab('tax')}
-        >
-          <DollarSign size={16} style={{ marginRight: 6 }} />
-          Tax & Rates
-        </button>
-        <button 
-          className={`tab ${activeTab === 'minimums' ? 'active' : ''}`}
-          onClick={() => setActiveTab('minimums')}
-        >
-          <Shield size={16} style={{ marginRight: 6 }} />
-          Labor Minimums
-        </button>
-        <button 
-          className={`tab ${activeTab === 'rolllimits' ? 'active' : ''}`}
-          onClick={() => setActiveTab('rolllimits')}
-        >
-          🔧 Roll Limits
-        </button>
-        <button 
-          className={`tab ${activeTab === 'mandreldies' ? 'active' : ''}`}
-          onClick={() => setActiveTab('mandreldies')}
-        >
-          ⚙️ Mandrel Dies
-        </button>
-        <button 
-          className={`tab ${activeTab === 'grades' ? 'active' : ''}`}
-          onClick={() => setActiveTab('grades')}
-        >
-          📊 Material Grades
-        </button>
-        <button 
-          className={`tab ${activeTab === 'weldrates' ? 'active' : ''}`}
-          onClick={() => setActiveTab('weldrates')}
-        >
-          🔥 Weld Rates
-        </button>
-
-        {/* ── DIVIDER ── */}
-        <span style={{ borderLeft: '2px solid #ddd', height: 24, margin: '6px 8px', alignSelf: 'center' }} />
-
-        {/* ── COMPLIANCE ── */}
-        <span style={{ fontSize: '0.65rem', color: '#999', textTransform: 'uppercase', letterSpacing: 1, padding: '8px 10px 4px', fontWeight: 700, userSelect: 'none' }}>Compliance</span>
-        <button 
-          className={`tab ${activeTab === 'permits' ? 'active' : ''}`}
-          onClick={() => setActiveTab('permits')}
-        >
-          🔐 Permit Verify
-        </button>
-
-        {/* ── DIVIDER ── */}
-        <span style={{ borderLeft: '2px solid #ddd', height: 24, margin: '6px 8px', alignSelf: 'center' }} />
-
-        {/* ── NOTIFICATIONS ── */}
-        <span style={{ fontSize: '0.65rem', color: '#999', textTransform: 'uppercase', letterSpacing: 1, padding: '8px 10px 4px', fontWeight: 700, userSelect: 'none' }}>Notifications</span>
-        <button 
-          className={`tab ${activeTab === 'schedule' ? 'active' : ''}`}
-          onClick={() => setActiveTab('schedule')}
-        >
-          <Clock size={16} style={{ marginRight: 6 }} />
-          Daily Digest
-        </button>
-
-        {/* ── DIVIDER ── */}
-        <span style={{ borderLeft: '2px solid #ddd', height: 24, margin: '6px 8px', alignSelf: 'center' }} />
-
-        {/* ── USERS & LOGS ── */}
-        <span style={{ fontSize: '0.65rem', color: '#999', textTransform: 'uppercase', letterSpacing: 1, padding: '8px 10px 4px', fontWeight: 700, userSelect: 'none' }}>Users & Logs</span>
-        <button 
-          className={`tab ${activeTab === 'users' ? 'active' : ''}`}
-          onClick={() => setActiveTab('users')}
-        >
-          <Users size={16} style={{ marginRight: 6 }} />
-          Users
-        </button>
-        <button 
-          className={`tab ${activeTab === 'logs' ? 'active' : ''}`}
-          onClick={() => setActiveTab('logs')}
-        >
-          <Activity size={16} style={{ marginRight: 6 }} />
-          Activity Logs
-        </button>
-        <button 
-          className={`tab ${activeTab === 'system' ? 'active' : ''}`}
-          onClick={() => setActiveTab('system')}
-        >
-          <AlertTriangle size={16} style={{ marginRight: 6 }} />
-          System Logs
-          {window.nasErrorLog?.length > 0 && (
-            <span style={{ 
-              marginLeft: 6, 
-              background: '#e53935', 
-              color: 'white', 
-              borderRadius: 10, 
-              padding: '2px 8px',
-              fontSize: '0.75rem'
-            }}>
-              {window.nasErrorLog.length}
-            </span>
-          )}
-        </button>
+        {section === 'shop-config' && (<>
+          <button className={`tab ${activeTab === 'tax' ? 'active' : ''}`} onClick={() => setActiveTab('tax')}>
+            <DollarSign size={16} style={{ marginRight: 6 }} />Tax & Rates
+          </button>
+          <button className={`tab ${activeTab === 'minimums' ? 'active' : ''}`} onClick={() => setActiveTab('minimums')}>
+            <Shield size={16} style={{ marginRight: 6 }} />Labor Minimums
+          </button>
+          <button className={`tab ${activeTab === 'rolllimits' ? 'active' : ''}`} onClick={() => setActiveTab('rolllimits')}>🔧 Roll Limits</button>
+          <button className={`tab ${activeTab === 'mandreldies' ? 'active' : ''}`} onClick={() => setActiveTab('mandreldies')}>⚙️ Mandrel Dies</button>
+          <button className={`tab ${activeTab === 'grades' ? 'active' : ''}`} onClick={() => setActiveTab('grades')}>📊 Material Grades</button>
+          <button className={`tab ${activeTab === 'weldrates' ? 'active' : ''}`} onClick={() => setActiveTab('weldrates')}>🔥 Weld Rates</button>
+          <button className={`tab ${activeTab === 'printer' ? 'active' : ''}`} onClick={() => setActiveTab('printer')}>🖨️ Printer</button>
+        </>)}
+        {section === 'users-logs' && (<>
+          <button className={`tab ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
+            <Users size={16} style={{ marginRight: 6 }} />Users
+          </button>
+          <button className={`tab ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
+            <Activity size={16} style={{ marginRight: 6 }} />Activity Logs
+          </button>
+          <button className={`tab ${activeTab === 'schedule' ? 'active' : ''}`} onClick={() => setActiveTab('schedule')}>
+            <Clock size={16} style={{ marginRight: 6 }} />Daily Digest
+          </button>
+          <button className={`tab ${activeTab === 'apikeys' ? 'active' : ''}`} onClick={() => setActiveTab('apikeys')}>
+            <Key size={16} style={{ marginRight: 6 }} />API Keys
+          </button>
+          <button className={`tab ${activeTab === 'system' ? 'active' : ''}`} onClick={() => setActiveTab('system')}>
+            <AlertTriangle size={16} style={{ marginRight: 6 }} />System & 2FA
+            {window.nasErrorLog?.length > 0 && (
+              <span style={{ marginLeft: 6, background: '#e53935', color: 'white', borderRadius: 10, padding: '2px 8px', fontSize: '0.75rem' }}>
+                {window.nasErrorLog.length}
+              </span>
+            )}
+          </button>
+        </>)}
       </div>
 
       {loading ? (
@@ -1641,6 +1742,83 @@ function AdminPage() {
 
       {activeTab === 'system' && !loading && (
         <div>
+          {/* Two-Factor Authentication */}
+          <div className="card" style={{ marginBottom: 20 }}>
+            <h3 style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Shield size={20} />
+              Two-Factor Authentication (2FA)
+            </h3>
+            {!twoFAState.enabled ? (
+              !twoFAState.setupData ? (
+                <div>
+                  <p style={{ color: '#666', marginBottom: 12 }}>
+                    Add an extra layer of security to your account. When enabled, you'll need to enter a 6-digit code from your authenticator app each time you log in.
+                  </p>
+                  <button className="btn btn-primary" onClick={async () => {
+                    try {
+                      const resp = await setup2FA();
+                      setTwoFAState(prev => ({ ...prev, setupData: resp.data.data }));
+                    } catch (err) { setError('Failed to start 2FA setup'); }
+                  }}>
+                    <Shield size={18} /> Enable 2FA
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <p style={{ fontWeight: 600, marginBottom: 12 }}>1. Scan this QR code with your authenticator app:</p>
+                  <div style={{ textAlign: 'center', marginBottom: 16 }}>
+                    <img src={twoFAState.setupData.qrCode} alt="2FA QR Code" style={{ maxWidth: 200 }} />
+                  </div>
+                  <p style={{ fontSize: '0.8rem', color: '#666', marginBottom: 4 }}>Can't scan? Enter this key manually:</p>
+                  <div style={{ background: '#f5f5f5', padding: '8px 12px', borderRadius: 6, fontFamily: 'monospace', fontSize: '0.85rem', marginBottom: 16, wordBreak: 'break-all' }}>
+                    {twoFAState.setupData.secret}
+                  </div>
+                  <p style={{ fontWeight: 600, marginBottom: 8 }}>2. Enter the 6-digit code from the app to verify:</p>
+                  <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <input type="text" className="form-input" value={twoFAState.verifyCode}
+                      onChange={(e) => setTwoFAState(prev => ({ ...prev, verifyCode: e.target.value.replace(/\D/g, '').slice(0, 6) }))}
+                      placeholder="000000" maxLength={6} inputMode="numeric"
+                      style={{ maxWidth: 160, textAlign: 'center', fontSize: '1.5rem', letterSpacing: '0.3em', fontFamily: 'monospace' }} />
+                    <button className="btn btn-success" disabled={twoFAState.verifyCode.length !== 6} onClick={async () => {
+                      try {
+                        await verify2FA(twoFAState.verifyCode);
+                        setTwoFAState({ enabled: true, setupData: null, verifyCode: '' });
+                        setSuccess('Two-factor authentication enabled!');
+                      } catch (err) { setError(err.response?.data?.error?.message || 'Invalid code'); }
+                    }}>Verify & Enable</button>
+                    <button className="btn btn-outline" onClick={() => setTwoFAState(prev => ({ ...prev, setupData: null, verifyCode: '' }))}>Cancel</button>
+                  </div>
+                </div>
+              )
+            ) : (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                  <span style={{ background: '#e8f5e9', color: '#2e7d32', padding: '6px 12px', borderRadius: 6, fontWeight: 600, fontSize: '0.9rem' }}>
+                    ✓ 2FA is enabled
+                  </span>
+                </div>
+                <p style={{ color: '#666', marginBottom: 12, fontSize: '0.9rem' }}>
+                  Your account is protected with two-factor authentication. To disable, enter your password below.
+                </p>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <input type="password" className="form-input" value={twoFAState.disablePassword || ''}
+                    onChange={(e) => setTwoFAState(prev => ({ ...prev, disablePassword: e.target.value }))}
+                    placeholder="Enter password to disable" style={{ maxWidth: 250 }} />
+                  <button className="btn btn-danger" disabled={!twoFAState.disablePassword}
+                    onClick={async () => {
+                      if (!window.confirm('Are you sure you want to disable 2FA? Your account will only be protected by your password.')) return;
+                      try {
+                        await disable2FA(twoFAState.disablePassword);
+                        setTwoFAState({ enabled: false, setupData: null, verifyCode: '', disablePassword: '' });
+                        setSuccess('Two-factor authentication disabled.');
+                      } catch (err) { setError(err.response?.data?.error?.message || 'Failed to disable 2FA'); }
+                    }}>Disable 2FA</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* System Logs */}
           <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
             <button className="btn btn-outline" onClick={refreshSystemLogs}>
               <RefreshCw size={18} />
@@ -1708,6 +1886,448 @@ function AdminPage() {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'printer' && !loading && (
+        <div>
+          <div className="card">
+            <h3 style={{ marginBottom: 16 }}>🖨️ Label Printer Configuration</h3>
+            <p style={{ color: '#666', marginBottom: 16, fontSize: '0.85rem' }}>
+              Configure two independent Brother printers — one for QR code stickers, one for part info labels. All tablets pull this config automatically.
+            </p>
+
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+              {/* QR Code Printer */}
+              <div style={{ flex: 1, minWidth: 280, background: '#e3f2fd', borderRadius: 8, padding: 16 }}>
+                <h4 style={{ marginBottom: 12, color: '#1565c0' }}>📦 QR Code Printer</h4>
+                <p style={{ fontSize: '0.8rem', color: '#666', marginBottom: 12 }}>For shipment and supply QR stickers.</p>
+                
+                <div className="form-group">
+                  <label className="form-label">Printer IP Address</label>
+                  <input type="text" className="form-input" placeholder="e.g. 192.168.1.50"
+                    value={printerConfig.qrPrinterIp} onChange={(e) => setPrinterConfig({ ...printerConfig, qrPrinterIp: e.target.value })} />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Label Type</label>
+                  <select className="form-select" value={printerConfig.qrLabelType}
+                    onChange={(e) => setPrinterConfig({ ...printerConfig, qrLabelType: e.target.value })}>
+                    <option value="CONTINUOUS_29">29mm Continuous (DK-22210)</option>
+                    <option value="CONTINUOUS_38">38mm Continuous (DK-22225)</option>
+                    <option value="CONTINUOUS_50">50mm Continuous (DK-22223)</option>
+                    <option value="CONTINUOUS_62">62mm Continuous (DK-22205)</option>
+                    <option value="CONTINUOUS_12">12mm Continuous (DK-22214)</option>
+                    <option value="DK_11202_62x100">62mm x 100mm Die-Cut (DK-11202)</option>
+                    <option value="DK_11209_29x62">29mm x 62mm Die-Cut (DK-11209)</option>
+                    <option value="QR_29x25">QR 29mm x 25mm</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Cut Length (mm)</label>
+                  <input type="number" className="form-input" value={printerConfig.qrLabelLengthMm}
+                    onChange={(e) => setPrinterConfig({ ...printerConfig, qrLabelLengthMm: parseInt(e.target.value) || 25 })}
+                    style={{ maxWidth: 120 }} />
+                  <small style={{ color: '#666' }}>Length each QR label is cut to. Ignored for die-cut labels.</small>
+                </div>
+              </div>
+
+              {/* Part Label Printer */}
+              <div style={{ flex: 1, minWidth: 280, background: '#fff3e0', borderRadius: 8, padding: 16 }}>
+                <h4 style={{ marginBottom: 12, color: '#e65100' }}>🏷️ Part Label Printer</h4>
+                <p style={{ fontSize: '0.8rem', color: '#666', marginBottom: 12 }}>For part info tags (Part#, PO, Heat#). Auto-sizes length to fit content.</p>
+                
+                <div className="form-group">
+                  <label className="form-label">Printer IP Address</label>
+                  <input type="text" className="form-input" placeholder="e.g. 192.168.1.51"
+                    value={printerConfig.partPrinterIp} onChange={(e) => setPrinterConfig({ ...printerConfig, partPrinterIp: e.target.value })} />
+                  <small style={{ color: '#666' }}>Can be the same IP as QR printer if using one printer.</small>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Label Type</label>
+                  <select className="form-select" value={printerConfig.partLabelType}
+                    onChange={(e) => setPrinterConfig({ ...printerConfig, partLabelType: e.target.value })}>
+                    <option value="DK_11202_62x100">62mm x 100mm Die-Cut (DK-11202)</option>
+                    <option value="DK_11209_29x62">29mm x 62mm Die-Cut (DK-11209)</option>
+                    <option value="DK_11201_29x90">29mm x 90mm Die-Cut (DK-11201)</option>
+                    <option value="CONTINUOUS_62">62mm Continuous (DK-22205)</option>
+                    <option value="CONTINUOUS_50">50mm Continuous (DK-22223)</option>
+                    <option value="CONTINUOUS_38">38mm Continuous (DK-22225)</option>
+                    <option value="CONTINUOUS_29">29mm Continuous (DK-22210)</option>
+                  </select>
+                  <small style={{ color: '#666' }}>For continuous tape, the printer auto-cuts to fit content — no length limit.</small>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 20, display: 'flex', gap: 8 }}>
+              <button className="btn btn-primary" onClick={handleSavePrinterConfig} disabled={saving}>
+                {saving ? 'Saving...' : '💾 Save Printer Config'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'printer' && !loading && (
+        <div>
+          <div className="card">
+            <h3 style={{ marginBottom: 16 }}>🖨️ Label Printer Configuration</h3>
+            <p style={{ color: '#666', marginBottom: 16, fontSize: '0.85rem' }}>
+              These settings are shared with all tablets. Tablets pull this config automatically.
+            </p>
+
+            <div className="form-group">
+              <label className="form-label">Printer IP Address</label>
+              <input type="text" className="form-input" placeholder="e.g. 192.168.1.50" style={{ maxWidth: 280 }}
+                value={printerConfig.printerIp} onChange={(e) => setPrinterConfig({ ...printerConfig, printerIp: e.target.value })} />
+              <small style={{ color: '#666' }}>Brother QL-810W network IP. All tablets will use this printer.</small>
+            </div>
+
+            <div style={{ marginTop: 16, padding: 16, background: '#f0f7ff', borderRadius: 8, border: '1px solid #bbdefb' }}>
+              <h4 style={{ marginBottom: 12, color: '#1565c0' }}>QR Code Labels (Shipment / Supply Tags)</h4>
+              <div className="grid grid-3" style={{ gap: 16 }}>
+                <div className="form-group">
+                  <label className="form-label">Label Type</label>
+                  <select className="form-select" value={printerConfig.qrLabelType}
+                    onChange={(e) => setPrinterConfig({ ...printerConfig, qrLabelType: e.target.value })}>
+                    <option value="CONTINUOUS_29">29mm Continuous (DK-22210)</option>
+                    <option value="CONTINUOUS_38">38mm Continuous (DK-22225)</option>
+                    <option value="CONTINUOUS_50">50mm Continuous (DK-22223)</option>
+                    <option value="CONTINUOUS_62">62mm Continuous (DK-22205)</option>
+                    <option value="DK_11202_62x100">62mm x 100mm Die-Cut (DK-11202)</option>
+                    <option value="DK_11209_29x62">29mm x 62mm Die-Cut (DK-11209)</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Tape Width (mm)</label>
+                  <input type="number" className="form-input" value={printerConfig.qrLabelWidthMm}
+                    onChange={(e) => setPrinterConfig({ ...printerConfig, qrLabelWidthMm: parseInt(e.target.value) || 29 })} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Cut Length (mm)</label>
+                  <input type="number" className="form-input" value={printerConfig.qrLabelLengthMm}
+                    onChange={(e) => setPrinterConfig({ ...printerConfig, qrLabelLengthMm: parseInt(e.target.value) || 25 })} />
+                  <small style={{ color: '#666' }}>For continuous tape only — how long to cut each QR label.</small>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16, padding: 16, background: '#f1f8e9', borderRadius: 8, border: '1px solid #c5e1a5' }}>
+              <h4 style={{ marginBottom: 8, color: '#33691e' }}>Part Info Labels (Heat# / Client Part# Tags)</h4>
+              <p style={{ fontSize: '0.85rem', color: '#666' }}>
+                Part labels use the <strong>same tape type</strong> as QR labels but auto-calculate length based on content.
+                A 3-line label will print at ~40mm, shorter labels for fewer lines. No fixed length limit.
+              </p>
+            </div>
+
+            <button className="btn btn-primary" onClick={handleSavePrinterConfig} disabled={saving} style={{ marginTop: 20 }}>
+              {saving ? 'Saving...' : '💾 Save Printer Config'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'apikeys' && !loading && (
+        <div>
+          <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
+            <button className="btn btn-primary" onClick={() => { setShowNewApiKeyModal(true); setCreatedApiKey(null); }}>
+              <Plus size={18} />
+              Create API Key
+            </button>
+          </div>
+
+          {/* Show newly created key */}
+          {createdApiKey && (
+            <div className="card" style={{ marginBottom: 16, border: '2px solid #4caf50', background: '#e8f5e9' }}>
+              <h4 style={{ color: '#2e7d32', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Check size={20} />
+                API Key Created
+              </h4>
+              <p style={{ marginBottom: 8, color: '#333' }}>
+                Copy this key now — <strong>it will not be shown again</strong>:
+              </p>
+              <div style={{ 
+                background: '#fff', border: '1px solid #ccc', borderRadius: 6, padding: '12px 16px', 
+                fontFamily: 'monospace', fontSize: '0.95rem', wordBreak: 'break-all', marginBottom: 8
+              }}>
+                {createdApiKey.key}
+              </div>
+              <button className="btn btn-outline" onClick={() => {
+                navigator.clipboard.writeText(createdApiKey.key);
+                setSuccess('API key copied to clipboard');
+              }}>
+                Copy to Clipboard
+              </button>
+              <button className="btn" style={{ marginLeft: 8, background: '#1976d2', color: 'white' }} onClick={() => handleShowSetupQR(createdApiKey.id, createdApiKey.name)}>
+                📱 Generate Setup QR
+              </button>
+            </div>
+          )}
+
+          <div className="card">
+            <h3 style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              🌐 Approved IP Addresses
+            </h3>
+            <p style={{ color: '#666', marginBottom: 12, fontSize: '0.85rem' }}>
+              These IPs are allowed for <strong>tablet API keys</strong> (keys with a Device Name set). Client portal keys without a device name are exempt from IP restrictions so customers can connect from anywhere.
+            </p>
+            
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <input type="text" className="form-input" placeholder="e.g. 72.45.123.89 or 192.168.1.0/24"
+                value={newIP} onChange={(e) => setNewIP(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleAddIP(); }}
+                style={{ maxWidth: 280 }} />
+              <button className="btn btn-primary" onClick={handleAddIP} disabled={!newIP.trim()} style={{ padding: '6px 16px' }}>
+                + Add IP
+              </button>
+            </div>
+
+            {approvedIPs.length === 0 ? (
+              <div style={{ padding: 16, background: '#fff3e0', borderRadius: 8, fontSize: '0.85rem', color: '#e65100' }}>
+                No approved IPs set — tablet API keys will only use their individual IP restrictions (or allow all if blank).
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {approvedIPs.map(ip => (
+                  <div key={ip} style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#e8f5e9', border: '1px solid #a5d6a7', borderRadius: 6, padding: '4px 10px', fontSize: '0.9rem' }}>
+                    <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#2e7d32' }}>{ip}</span>
+                    <button onClick={() => handleRemoveIP(ip)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c62828', fontSize: '1.1rem', padding: '0 2px', lineHeight: 1 }}
+                      title="Remove">×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <h3 style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Key size={20} />
+              API Keys
+            </h3>
+            <p style={{ color: '#666', marginBottom: 16 }}>
+              API keys allow external applications (like the customer portal) to securely access your data.
+              Each key can be scoped to a specific client or given full access.
+            </p>
+
+            {apiKeys.length === 0 ? (
+              <div className="empty-state" style={{ padding: 40 }}>
+                <div className="empty-state-icon">🔑</div>
+                <div className="empty-state-title">No API Keys</div>
+                <p>Create an API key to allow external apps to access your data.</p>
+              </div>
+            ) : (
+              <table className="data-table" style={{ width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th>Name / Device</th>
+                    <th>Operator</th>
+                    <th>Permissions</th>
+                    <th>Status</th>
+                    <th>Last Used / IP</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {apiKeys.map(key => (
+                    <tr key={key.id} style={{ opacity: key.isActive ? 1 : 0.6 }}>
+                      <td>
+                        <div style={{ fontWeight: 600 }}>{key.name}</div>
+                        {key.deviceName && <div style={{ fontSize: '0.75rem', color: '#666' }}>📱 {key.deviceName}</div>}
+                        {key.clientName && <div style={{ fontSize: '0.75rem', color: '#1565c0' }}>🔒 {key.clientName}</div>}
+                        {key.allowedIPs && <div style={{ fontSize: '0.7rem', color: '#e65100' }}>🌐 {key.allowedIPs}</div>}
+                      </td>
+                      <td>{key.operatorName || <span style={{ color: '#ccc' }}>—</span>}</td>
+                      <td>
+                        <span style={{
+                          padding: '2px 8px', borderRadius: 4, fontSize: '0.75rem', fontWeight: 500,
+                          background: key.permissions === 'admin' ? '#ffebee' : key.permissions === 'read_write' ? '#fff3e0' : '#e8f5e9',
+                          color: key.permissions === 'admin' ? '#c62828' : key.permissions === 'read_write' ? '#e65100' : '#2e7d32'
+                        }}>
+                          {key.permissions}
+                        </span>
+                      </td>
+                      <td>
+                        <span style={{
+                          padding: '2px 8px', borderRadius: 4, fontSize: '0.75rem', fontWeight: 500,
+                          background: key.isActive ? '#e8f5e9' : '#ffebee',
+                          color: key.isActive ? '#2e7d32' : '#c62828'
+                        }}>
+                          {key.isActive ? 'Active' : 'Revoked'}
+                        </span>
+                        {key.revokedReason && <div style={{ fontSize: '0.7rem', color: '#c62828', marginTop: 2 }}>{key.revokedReason}</div>}
+                      </td>
+                      <td style={{ fontSize: '0.8rem', color: '#666' }}>
+                        {key.lastUsedAt ? new Date(key.lastUsedAt).toLocaleDateString() : 'Never'}
+                        {key.lastIP && <div style={{ fontSize: '0.7rem', color: '#999' }}>{key.lastIP}</div>}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button style={{ padding: '4px 10px', fontSize: '0.8rem', background: '#f5f5f5', color: '#333', border: '1px solid #ccc', borderRadius: 4, cursor: 'pointer' }}
+                            onClick={() => { setEditingApiKey(key); setEditApiKeyData({ name: key.name || '', deviceName: key.deviceName || '', operatorName: key.operatorName || '', clientName: key.clientName || '', permissions: key.permissions || 'read', allowedIPs: key.allowedIPs || '' }); }}>✏️ Edit</button>
+                          {key.isActive && (
+                            <button style={{ padding: '4px 10px', fontSize: '0.8rem', background: '#e3f2fd', color: '#1565c0', border: '1px solid #90caf9', borderRadius: 4, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+                              onClick={() => handleShowSetupQR(key.id, key.name)}>📱 Setup QR</button>
+                          )}
+                          {key.isActive ? (
+                            <button className="btn btn-danger" style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                              onClick={() => handleRevokeApiKey(key.id, key.name)}>Revoke</button>
+                          ) : (
+                            <>
+                            <button className="btn btn-success" style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                              onClick={async () => {
+                                try {
+                                  await updateApiKey(key.id, { isActive: true });
+                                  setSuccess(`API key "${key.name}" reactivated`);
+                                  loadApiKeys();
+                                } catch { setError('Failed to reactivate key'); }
+                              }}>Reactivate</button>
+                            <button style={{ padding: '4px 12px', fontSize: '0.8rem', background: '#ffebee', color: '#c62828', border: '1px solid #ef9a9a', borderRadius: 4, cursor: 'pointer' }}
+                              onClick={async () => {
+                                if (!window.confirm(`Permanently delete API key "${key.name}"? This cannot be undone.`)) return;
+                                try {
+                                  await deleteApiKeyPermanent(key.id);
+                                  setSuccess(`API key "${key.name}" deleted`);
+                                  loadApiKeys();
+                                } catch { setError('Failed to delete key'); }
+                              }}>🗑️ Delete</button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <h4 style={{ marginBottom: 8 }}>Usage</h4>
+            <p style={{ color: '#666', marginBottom: 8 }}>External apps include the key in the <code>X-API-Key</code> header:</p>
+            <pre style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, fontSize: '0.85rem', overflow: 'auto' }}>
+{`fetch('https://carolina-rolling-inventory-api-641af96c90aa.herokuapp.com/api/workorders', {
+  headers: { 'X-API-Key': 'crm_your_key_here' }
+})`}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {/* New API Key Modal */}
+      {showNewApiKeyModal && (
+        <div className="modal-overlay" onClick={() => setShowNewApiKeyModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Create API Key</h3>
+              <button className="modal-close" onClick={() => setShowNewApiKeyModal(false)}>&times;</button>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Name *</label>
+              <input type="text" className="form-input" placeholder="e.g. Shop Tablet 1, Customer Portal"
+                value={newApiKey.name} onChange={(e) => setNewApiKey({ ...newApiKey, name: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Device Name</label>
+              <input type="text" className="form-input" placeholder="e.g. Shop Tablet 1, Brake Press Tablet"
+                value={newApiKey.deviceName} onChange={(e) => setNewApiKey({ ...newApiKey, deviceName: e.target.value })} />
+              <small style={{ color: '#666' }}>Identifies which physical device uses this key.</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Operator Name</label>
+              <input type="text" className="form-input" placeholder="e.g. Jesus, Mike"
+                value={newApiKey.operatorName} onChange={(e) => setNewApiKey({ ...newApiKey, operatorName: e.target.value })} />
+              <small style={{ color: '#666' }}>Fixed operator for this tablet. Logged when parts are marked complete.</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Allowed IPs</label>
+              <input type="text" className="form-input" placeholder="e.g. 72.133.45.67 or 192.168.1.0/24"
+                value={newApiKey.allowedIPs} onChange={(e) => setNewApiKey({ ...newApiKey, allowedIPs: e.target.value })} />
+              <small style={{ color: '#666' }}>Optional — per-key override. The global Approved IPs list applies to all keys automatically. Only add IPs here if this key needs additional IPs beyond the global list.</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Client Scope (optional)</label>
+              <input type="text" className="form-input" placeholder="Leave empty for all clients"
+                value={newApiKey.clientName} onChange={(e) => setNewApiKey({ ...newApiKey, clientName: e.target.value })} />
+              <small style={{ color: '#666' }}>If set, this key can only see work orders for this specific client.</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Permissions</label>
+              <select className="form-input" value={newApiKey.permissions}
+                onChange={(e) => setNewApiKey({ ...newApiKey, permissions: e.target.value })}>
+                <option value="read">Read Only — can view work orders and documents</option>
+                <option value="read_write">Read & Write — can also update data (shop tablets)</option>
+                <option value="admin">Admin — full access</option>
+              </select>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowNewApiKeyModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={() => { handleCreateApiKey(); setShowNewApiKeyModal(false); }} disabled={saving || !newApiKey.name.trim()}>
+                {saving ? 'Creating...' : 'Create Key'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit API Key Modal */}
+      {editingApiKey && (
+        <div className="modal-overlay" onClick={() => setEditingApiKey(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Edit API Key</h3>
+              <button className="modal-close" onClick={() => setEditingApiKey(null)}>&times;</button>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Name *</label>
+              <input type="text" className="form-input" value={editApiKeyData.name}
+                onChange={(e) => setEditApiKeyData({ ...editApiKeyData, name: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Device Name</label>
+              <input type="text" className="form-input" placeholder="Leave empty for client portal keys"
+                value={editApiKeyData.deviceName}
+                onChange={(e) => setEditApiKeyData({ ...editApiKeyData, deviceName: e.target.value })} />
+              <small style={{ color: '#e65100' }}>Keys with a device name are treated as tablet keys and checked against the global approved IPs. Clear this to exempt from IP checks.</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Operator Name</label>
+              <input type="text" className="form-input" placeholder="e.g. Jason, Miguel"
+                value={editApiKeyData.operatorName}
+                onChange={(e) => setEditApiKeyData({ ...editApiKeyData, operatorName: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Allowed IPs (per-key override)</label>
+              <input type="text" className="form-input" placeholder="Leave blank to use global list only"
+                value={editApiKeyData.allowedIPs}
+                onChange={(e) => setEditApiKeyData({ ...editApiKeyData, allowedIPs: e.target.value })} />
+              <small style={{ color: '#666' }}>Optional — comma-separated. Added on top of the global approved IPs.</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Client Scope</label>
+              <input type="text" className="form-input" placeholder="Leave empty for all clients"
+                value={editApiKeyData.clientName}
+                onChange={(e) => setEditApiKeyData({ ...editApiKeyData, clientName: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Permissions</label>
+              <select className="form-select" value={editApiKeyData.permissions}
+                onChange={(e) => setEditApiKeyData({ ...editApiKeyData, permissions: e.target.value })}>
+                <option value="read">Read Only</option>
+                <option value="read_write">Read + Write</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button className="btn btn-outline" onClick={() => setEditingApiKey(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSaveEditApiKey} disabled={saving || !editApiKeyData.name?.trim()}>
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
           </div>
         </div>
       )}

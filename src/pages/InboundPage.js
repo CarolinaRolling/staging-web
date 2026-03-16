@@ -22,27 +22,30 @@ function InboundPage() {
 
   useEffect(() => {
     loadOrders();
+    const interval = setInterval(() => loadOrders(true), 30000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     groupOrdersBySupplier();
   }, [orders, searchQuery]);
 
-  const loadOrders = async () => {
+  const loadOrders = async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const response = await getInboundOrders();
       setOrders(response.data.data || []);
     } catch (err) {
-      setError('Failed to load inbound orders');
+      if (!silent) setError('Failed to load inbound orders');
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   const groupOrdersBySupplier = () => {
-    let filtered = [...orders];
+    // Exclude received orders (already processed into shipments)
+    let filtered = orders.filter(o => o.status !== 'received');
 
     // Filter by search query
     if (searchQuery) {

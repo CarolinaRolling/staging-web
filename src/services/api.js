@@ -33,8 +33,14 @@ api.interceptors.response.use(
 );
 
 // Auth
-export const login = (username, password) => api.post('/auth/login', { username, password });
+export const login = (username, password, totpCode) => api.post('/auth/login', { username, password, totpCode });
 export const getCurrentUser = () => api.get('/auth/me');
+
+// 2FA
+export const setup2FA = () => api.post('/auth/2fa/setup');
+export const verify2FA = (code) => api.post('/auth/2fa/verify', { code });
+export const disable2FA = (password) => api.post('/auth/2fa/disable', { password });
+export const get2FAStatus = () => api.get('/auth/2fa/status');
 export const changePassword = (currentPassword, newPassword) => 
   api.put('/auth/change-password', { currentPassword, newPassword });
 
@@ -92,6 +98,8 @@ export const getDocumentSignedUrl = async (shipmentId, documentId) => {
   const response = await api.get(`/shipments/${shipmentId}/documents/${documentId}/signed-url`);
   return response.data.data;
 };
+export const downloadShipmentDocument = (shipmentId, documentId) =>
+  api.get(`/shipments/${shipmentId}/documents/${documentId}/download`, { responseType: 'blob' });
 
 // Locations
 export const getLocations = () => api.get('/settings/locations');
@@ -139,23 +147,30 @@ export const getPartFileSignedUrl = async (workOrderId, partId, fileId) => {
   const response = await api.get(`/workorders/${workOrderId}/parts/${partId}/files/${fileId}/signed-url`);
   return response.data.data;
 };
+export const downloadPartFile = (workOrderId, partId, fileId) =>
+  api.get(`/workorders/${workOrderId}/parts/${partId}/files/${fileId}/download`, { responseType: 'blob' });
 export const deletePartFile = (workOrderId, partId, fileId) => 
   api.delete(`/workorders/${workOrderId}/parts/${partId}/files/${fileId}`);
 
 // Work Order Documents (for order-level attachments like POs, supplier docs)
-export const uploadWorkOrderDocuments = (workOrderId, files) => {
+export const uploadWorkOrderDocuments = (workOrderId, files, documentType) => {
   const formData = new FormData();
   files.forEach((file) => formData.append('documents', file));
+  if (documentType) formData.append('documentType', documentType);
   return api.post(`/workorders/${workOrderId}/documents`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
 };
 export const getWorkOrderDocumentSignedUrl = (workOrderId, documentId) => 
   api.get(`/workorders/${workOrderId}/documents/${documentId}/signed-url`);
+export const downloadWorkOrderDocument = (workOrderId, documentId) =>
+  api.get(`/workorders/${workOrderId}/documents/${documentId}/download`, { responseType: 'blob' });
 export const deleteWorkOrderDocument = (workOrderId, documentId) => 
   api.delete(`/workorders/${workOrderId}/documents/${documentId}`);
 export const regeneratePODocument = (workOrderId, documentId) => 
   api.post(`/workorders/${workOrderId}/documents/${documentId}/regenerate`);
+export const createPODocument = (workOrderId, poNumber) => 
+  api.post(`/workorders/${workOrderId}/create-po-pdf`, { poNumber });
 
 // Work Order Material Ordering
 export const orderWorkOrderMaterial = (workOrderId, data) => 
@@ -235,6 +250,7 @@ export const archiveOldEstimates = () => api.post('/estimates/archive-old');
 // Work Order Shipping & Archiving
 export const shipWorkOrder = (id, data) => api.post(`/workorders/${id}/ship`, data);
 export const archiveWorkOrder = (id) => api.post(`/workorders/${id}/archive`);
+export const recordPickup = (id, data) => api.post(`/workorders/${id}/pickup`, data);
 export const getArchivedWorkOrders = (params) => api.get('/workorders/archived', { params });
 export const getRecentlyCompletedOrders = () => api.get('/workorders/recently-completed');
 export const duplicateWorkOrderToEstimate = (id) => api.post(`/workorders/${id}/duplicate-to-estimate`);
@@ -246,6 +262,7 @@ export const getNextDRNumber = () => api.get('/dr-numbers/next');
 export const setNextDRNumber = (nextNumber) => api.put('/dr-numbers/next', { nextNumber });
 export const assignDRNumber = (data) => api.post('/dr-numbers/assign', data);
 export const voidDRNumber = (drNumber, reason, voidedBy) => api.post(`/dr-numbers/${drNumber}/void`, { reason, voidedBy });
+export const releaseDRNumber = (drNumber) => api.delete(`/dr-numbers/${drNumber}/release`);
 export const getVoidedDRNumbers = () => api.get('/dr-numbers/voided');
 
 // PO Numbers
@@ -257,6 +274,10 @@ export const assignPONumber = (data) => api.post('/po-numbers/assign', data);
 export const voidPONumber = (poNumber, reason, voidedBy) => api.post(`/po-numbers/${poNumber}/void`, { reason, voidedBy });
 export const getVoidedPONumbers = () => api.get('/po-numbers/voided');
 export const deletePONumber = (id) => api.delete(`/po-numbers/${id}`);
+export const archivePONumber = (id) => api.post(`/po-numbers/${id}/archive`);
+export const unarchivePONumber = (id) => api.post(`/po-numbers/${id}/unarchive`);
+export const releasePONumber = (poNumber) => api.delete(`/po-numbers/${poNumber}/release`);
+export const reassignPONumber = (oldPoNumber, newPoNumber) => api.put(`/po-numbers/${oldPoNumber}/reassign`, { newPoNumber });
 
 // Daily Email Settings
 export const getDailyEmailSettings = () => api.get('/email/settings');
@@ -268,7 +289,7 @@ export const getEmailLogs = () => api.get('/email/logs');
 
 // Backup
 export const getBackupInfo = () => api.get('/backup/info');
-export const downloadBackup = (params) => api.get('/backup', { params, responseType: 'blob' });
+export const downloadBackup = (params) => api.get('/backup', { params });
 export const restoreBackup = (data) => api.post('/backup/restore', data);
 
 // Email Settings
@@ -278,6 +299,8 @@ export const updateNotificationEmail = (email) => api.put('/settings/notificatio
 // General Settings
 export const getSettings = (key) => api.get(`/settings/${key}`);
 export const updateSettings = (key, value) => api.put(`/settings/${key}`, { value });
+export const getPrinterConfig = () => api.get('/settings/printer-config');
+export const updatePrinterConfig = (config) => api.put('/settings/printer-config', config);
 
 // Schedule Email Settings
 export const getScheduleEmailSettings = () => api.get('/settings/schedule-email');
@@ -309,4 +332,38 @@ export const getBatchStatus = () => api.get('/verify-permits/batch/status');
 export const cancelBatchVerification = () => api.post('/verify-permits/batch/cancel');
 export const downloadResaleReport = () => api.get('/verify-permits/report-pdf', { responseType: 'blob' });
 
+// API Key Management
+export const getApiKeys = () => api.get('/auth/api-keys');
+export const getApiKeySetupQR = (id) => api.get(`/auth/api-keys/${id}/setup-qr`);
+export const createApiKey = (data) => api.post('/auth/api-keys', data);
+export const updateApiKey = (id, data) => api.put(`/auth/api-keys/${id}`, data);
+export const revokeApiKey = (id) => api.delete(`/auth/api-keys/${id}`);
+export const deleteApiKeyPermanent = (id) => api.delete(`/auth/api-keys/${id}/permanent`);
+export const getApprovedIPs = () => api.get('/auth/approved-ips');
+export const updateApprovedIPs = (ips) => api.put('/auth/approved-ips', { ips });
+
 export default api;
+
+
+// QuickBooks IIF Export
+export const exportWorkOrderIIF = (id) => api.get(`/quickbooks/export/${id}`, { responseType: 'blob' });
+export const exportBatchIIF = (workOrderIds) => api.post('/quickbooks/export-batch', { workOrderIds }, { responseType: 'blob' });
+export const previewIIF = (id) => api.get(`/quickbooks/preview/${id}`);
+export const exportCustomersIIF = () => api.post('/quickbooks/export-customers', {}, { responseType: 'blob' });
+
+// Shop Supplies
+export const getShopSupplies = (params) => api.get('/shop-supplies', { params });
+export const getLowStockSupplies = () => api.get('/shop-supplies/low-stock');
+export const getShopSupplyByQR = (qrCode) => api.get(`/shop-supplies/qr/${qrCode}`);
+export const createShopSupply = (data) => api.post('/shop-supplies', data);
+export const updateShopSupply = (id, data) => api.put(`/shop-supplies/${id}`, data);
+export const consumeShopSupply = (id, data) => api.post(`/shop-supplies/${id}/consume`, data);
+export const refillShopSupply = (id, data) => api.post(`/shop-supplies/${id}/refill`, data);
+export const getShopSupplyLogs = (id) => api.get(`/shop-supplies/${id}/logs`);
+export const deleteShopSupply = (id) => api.delete(`/shop-supplies/${id}`);
+export const uploadShopSupplyImage = (id, file) => {
+  const formData = new FormData();
+  formData.append('image', file);
+  return api.post(`/shop-supplies/${id}/image`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+};
+export const deleteShopSupplyImage = (id) => api.delete(`/shop-supplies/${id}/image`);

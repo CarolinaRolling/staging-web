@@ -8,7 +8,10 @@ function EstimatesPage() {
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [searching, setSearching] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
   const [showArchived, setShowArchived] = useState(false);
   const [showConvertModal, setShowConvertModal] = useState(null);
@@ -29,6 +32,34 @@ function EstimatesPage() {
     loadEstimates();
   }, [showArchived]);
 
+  useEffect(() => {
+    if (message) { const t = setTimeout(() => setMessage(null), 3000); return () => clearTimeout(t); }
+  }, [message]);
+
+  // Debounced server-side search across ALL statuses
+  const searchTimer = useRef(null);
+  useEffect(() => {
+    if (!searchQuery || searchQuery.length < 2) {
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const response = await getEstimates({ search: searchQuery });
+        setSearchResults(response.data.data || []);
+      } catch (err) {
+        console.error('Search error:', err);
+        setSearchResults(null);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(searchTimer.current);
+  }, [searchQuery]);
+
   const loadEstimates = async () => {
     try {
       setLoading(true);
@@ -43,6 +74,15 @@ function EstimatesPage() {
   };
 
   const getFilteredEstimates = () => {
+    // When searching, use server-side results (includes archived/accepted)
+    if (searchQuery && searchQuery.length >= 2 && searchResults !== null) {
+      let filtered = [...searchResults];
+      if (statusFilter !== 'all') {
+        filtered = filtered.filter(e => e.status === statusFilter);
+      }
+      return filtered;
+    }
+
     let filtered = [...estimates];
     
     if (statusFilter !== 'all') {
@@ -130,7 +170,7 @@ function EstimatesPage() {
   };
 
   const filteredEstimates = getFilteredEstimates();
-  const activeCount = estimates.filter(e => e.status !== 'archived').length;
+  const activeCount = estimates.filter(e => e.status !== 'archived' && e.status !== 'accepted').length;
 
   if (loading) {
     return <div className="loading"><div className="spinner"></div></div>;
@@ -152,13 +192,14 @@ function EstimatesPage() {
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
+      {message && <div style={{ background: '#e8f5e9', color: '#2e7d32', padding: '10px 16px', borderRadius: 8, marginBottom: 16, fontWeight: 500 }}>{message}</div>}
 
       {/* Tabs */}
       <div className="tabs">
-        <button className={`tab ${!showArchived ? 'active' : ''}`} onClick={() => setShowArchived(false)}>
+        <button className={`tab ${!showArchived ? 'active' : ''}`} onClick={() => { setShowArchived(false); setStatusFilter('all'); }}>
           Active
         </button>
-        <button className={`tab ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived(true)}>
+        <button className={`tab ${showArchived ? 'active' : ''}`} onClick={() => { setShowArchived(true); setStatusFilter('all'); }}>
           <Archive size={14} style={{ marginRight: 4 }} />
           Archived
         </button>
@@ -167,24 +208,45 @@ function EstimatesPage() {
       {/* Filters */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div className="search-box" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}>
+          <div className="search-box" style={{ flex: 1, minWidth: 200, marginBottom: 0, position: 'relative' }}>
             <Search size={18} className="search-box-icon" />
             <input
               type="text"
-              placeholder="Search by client, estimate number..."
+              placeholder="Search by client, estimate#, project..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery('')} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#999', fontSize: '1.1rem', padding: 4 }}>✕</button>
+            )}
           </div>
+          {searchQuery && searchQuery.length >= 2 && (
+            <span style={{ fontSize: '0.8rem', color: '#1565c0', fontWeight: 600, whiteSpace: 'nowrap' }}>
+              {searching ? '⏳ Searching...' : `🔍 All statuses (${getFilteredEstimates().length} found)`}
+            </span>
+          )}
           {!showArchived && (
             <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>
-              {['all', 'draft', 'sent', 'accepted', 'declined'].map(status => (
+              {['all', 'draft', 'sent', 'declined'].map(status => (
                 <button
                   key={status}
                   className={`tab ${statusFilter === status ? 'active' : ''}`}
                   onClick={() => setStatusFilter(status)}
                 >
                   {status.charAt(0).toUpperCase() + status.slice(1)}
+                </button>
+              ))}
+            </div>
+          )}
+          {showArchived && (
+            <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>
+              {['all', 'accepted', 'archived'].map(status => (
+                <button
+                  key={status}
+                  className={`tab ${statusFilter === status ? 'active' : ''}`}
+                  onClick={() => setStatusFilter(status)}
+                >
+                  {status === 'accepted' ? 'Converted to WO' : status.charAt(0).toUpperCase() + status.slice(1)}
                 </button>
               ))}
             </div>
@@ -197,7 +259,7 @@ function EstimatesPage() {
           <Archive size={20} />
           <div>
             <strong>Archived Estimates</strong>
-            <div style={{ fontSize: '0.8rem' }}>Estimates older than 1 month are automatically archived. Archived estimates are kept for 2 years.</div>
+            <div style={{ fontSize: '0.8rem' }}>Converted estimates and estimates older than 1 month appear here. Archived estimates are kept for 2 years.</div>
           </div>
         </div>
       )}
@@ -337,7 +399,7 @@ function EstimatesPage() {
                   onChange={async (e) => {
                     const value = e.target.value;
                     setNewEstData({ ...newEstData, clientName: value });
-                    if (value.length >= 2) {
+                    if (value.length >= 1) {
                       try {
                         const res = await searchClients(value);
                         setClientSuggestions(res.data.data || []);
@@ -348,10 +410,16 @@ function EstimatesPage() {
                       setShowClientSuggestions(false);
                     }
                   }}
-                  onFocus={() => clientSuggestions.length > 0 && setShowClientSuggestions(true)}
+                  onFocus={async () => {
+                    if (newEstData.clientName.length >= 1) {
+                      try { const res = await searchClients(newEstData.clientName); setClientSuggestions(res.data.data || []); setShowClientSuggestions(true); } catch {}
+                    } else {
+                      try { const res = await searchClients(''); setClientSuggestions(res.data.data || []); setShowClientSuggestions(true); } catch {}
+                    }
+                  }}
                   onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
                   autoComplete="off"
-                  placeholder="Start typing to search..."
+                  placeholder="Search or add client..."
                   autoFocus
                 />
                 {showClientSuggestions && clientSuggestions.length > 0 && (
@@ -391,6 +459,31 @@ function EstimatesPage() {
                         </span>
                       </div>
                     ))}
+                    {newEstData.clientName && newEstData.clientName.length >= 2 && !clientSuggestions.some(c => c.name.toLowerCase() === newEstData.clientName.toLowerCase()) && (
+                      <div style={{ padding: '10px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600, borderTop: '1px solid #c8e6c9' }}
+                        onMouseDown={() => {
+                          setShowClientSuggestions(false);
+                          navigate(`/clients-vendors?addClient=${encodeURIComponent(newEstData.clientName)}`);
+                        }}>
+                        + Add "{newEstData.clientName}" as new client
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Show add button when no suggestions at all */}
+                {showClientSuggestions && clientSuggestions.length === 0 && newEstData.clientName && newEstData.clientName.length >= 2 && (
+                  <div style={{
+                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
+                    background: 'white', border: '1px solid #ddd', borderRadius: 4,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
+                  }}>
+                    <div style={{ padding: '10px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600 }}
+                      onMouseDown={() => {
+                        setShowClientSuggestions(false);
+                        navigate(`/clients-vendors?addClient=${encodeURIComponent(newEstData.clientName)}`);
+                      }}>
+                      + Add "{newEstData.clientName}" as new client
+                    </div>
                   </div>
                 )}
               </div>

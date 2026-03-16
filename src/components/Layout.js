@@ -1,7 +1,8 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Package, Inbox, PlusCircle, Settings, Shield, LogOut, CalendarClock, ClipboardList, DollarSign, Database, Hash, Mail, ShoppingCart, FileCode, Truck } from 'lucide-react';
+import { Package, Inbox, PlusCircle, Settings, Shield, LogOut, CalendarClock, DollarSign, Database, Hash, ShoppingCart, FileCode, Truck, Users, Wrench } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import WalterJoke from './WalterJoke';
 
 function Layout({ children }) {
   const navigate = useNavigate();
@@ -16,109 +17,43 @@ function Layout({ children }) {
     <div className="layout">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1>CR Admin</h1>
-          <p>Carolina Rolling</p>
+          <img 
+            src="/logo.png" 
+            alt="Carolina Rolling Co." 
+            style={{ width: 48, height: 48, borderRadius: '50%', objectFit: 'cover' }} 
+          />
+          <div>
+            <h1>CR Admin</h1>
+            <p>Carolina Rolling</p>
+          </div>
         </div>
         <nav>
           <ul className="sidebar-nav">
-            <li>
-              <NavLink to="/inventory" className={({ isActive }) => isActive ? 'active' : ''}>
-                <Package size={20} />
-                <span>Inventory</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/scheduling" className={({ isActive }) => isActive ? 'active' : ''}>
-                <CalendarClock size={20} />
-                <span>Scheduling</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/new-shipment" className={({ isActive }) => isActive ? 'active' : ''}>
-                <PlusCircle size={20} />
-                <span>New Shipment</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/shipments" className={({ isActive }) => isActive ? 'active' : ''}>
-                <Truck size={20} />
-                <span>Shipments</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/inbound" className={({ isActive }) => isActive ? 'active' : ''}>
-                <Inbox size={20} />
-                <span>Inbound</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/estimates" className={({ isActive }) => isActive ? 'active' : ''}>
-                <DollarSign size={20} />
-                <span>Estimates</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/purchase-orders" className={({ isActive }) => isActive ? 'active' : ''}>
-                <ShoppingCart size={20} />
-                <span>Purchase Orders</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/settings" className={({ isActive }) => isActive ? 'active' : ''}>
-                <Settings size={20} />
-                <span>Settings</span>
-              </NavLink>
-            </li>
-            <li>
-              <NavLink to="/backup" className={({ isActive }) => isActive ? 'active' : ''}>
-                <Database size={20} />
-                <span>Backup</span>
-              </NavLink>
-            </li>
+            <li><NavLink to="/inventory" className={({ isActive }) => isActive ? 'active' : ''}><Package size={20} /><span>Inventory</span></NavLink></li>
+            <li><NavLink to="/scheduling" className={({ isActive }) => isActive ? 'active' : ''}><CalendarClock size={20} /><span>Scheduling</span></NavLink></li>
+            <li><NavLink to="/new-shipment" className={({ isActive }) => isActive ? 'active' : ''}><PlusCircle size={20} /><span>New Shipment</span></NavLink></li>
+            <li><NavLink to="/shipments" className={({ isActive }) => isActive ? 'active' : ''}><Truck size={20} /><span>Shipments</span></NavLink></li>
+            <li><NavLink to="/inbound" className={({ isActive }) => isActive ? 'active' : ''}><Inbox size={20} /><span>Inbound</span></NavLink></li>
+            <li><NavLink to="/estimates" className={({ isActive }) => isActive ? 'active' : ''}><DollarSign size={20} /><span>Estimates</span></NavLink></li>
+            <li><NavLink to="/purchase-orders" className={({ isActive }) => isActive ? 'active' : ''}><ShoppingCart size={20} /><span>Purchase Orders</span></NavLink></li>
+            <li><NavLink to="/clients-vendors" className={({ isActive }) => isActive ? 'active' : ''}><Users size={20} /><span>Clients & Vendors</span></NavLink></li>
+            <li><NavLink to="/shop-supplies" className={({ isActive }) => isActive ? 'active' : ''}><Package size={20} /><span>Shop Supplies</span></NavLink></li>
             {isAdmin() && (
               <>
                 <li style={{ 
-                  marginTop: 16, 
-                  paddingTop: 16, 
+                  marginTop: 16, paddingTop: 16, 
                   borderTop: '1px solid rgba(255,255,255,0.1)',
-                  fontSize: '0.7rem',
-                  color: 'rgba(255,255,255,0.5)',
-                  paddingLeft: 20,
-                  textTransform: 'uppercase',
-                  letterSpacing: 1
+                  fontSize: '0.7rem', color: 'rgba(255,255,255,0.5)',
+                  paddingLeft: 20, textTransform: 'uppercase', letterSpacing: 1
                 }}>
                   Admin
                 </li>
-                <li>
-                  <NavLink to="/admin" className={({ isActive }) => isActive ? 'active' : ''}>
-                    <Shield size={20} />
-                    <span>Users & Logs</span>
-                  </NavLink>
-                </li>
-                <li>
-                  <NavLink to="/admin/dr-numbers" className={({ isActive }) => isActive ? 'active' : ''}>
-                    <Hash size={20} />
-                    <span>DR Numbers</span>
-                  </NavLink>
-                </li>
-                <li>
-                  <NavLink to="/admin/po-numbers" className={({ isActive }) => isActive ? 'active' : ''}>
-                    <Hash size={20} />
-                    <span>PO Numbers</span>
-                  </NavLink>
-                </li>
-                <li>
-                  <NavLink to="/admin/email" className={({ isActive }) => isActive ? 'active' : ''}>
-                    <Mail size={20} />
-                    <span>Daily Email</span>
-                  </NavLink>
-                </li>
-                <li>
-                  <NavLink to="/admin/autocad-tools" className={({ isActive }) => isActive ? 'active' : ''}>
-                    <FileCode size={20} />
-                    <span>AutoCAD Tools</span>
-                  </NavLink>
-                </li>
+                <li><NavLink to="/admin/dr-numbers" className={({ isActive }) => isActive ? 'active' : ''}><Hash size={20} /><span>DR Numbers</span></NavLink></li>
+                <li><NavLink to="/admin/po-numbers" className={({ isActive }) => isActive ? 'active' : ''}><Hash size={20} /><span>PO Numbers</span></NavLink></li>
+                <li><NavLink to="/admin/users-logs" className={({ isActive }) => isActive ? 'active' : ''}><Shield size={20} /><span>Users & Logs</span></NavLink></li>
+                <li><NavLink to="/admin/shop-config" className={({ isActive }) => isActive ? 'active' : ''}><Wrench size={20} /><span>Shop Config</span></NavLink></li>
+                <li><NavLink to="/admin/settings" className={({ isActive }) => isActive ? 'active' : ''}><Settings size={20} /><span>Settings</span></NavLink></li>
+                <li><NavLink to="/admin/backup" className={({ isActive }) => isActive ? 'active' : ''}><Database size={20} /><span>Backup</span></NavLink></li>
               </>
             )}
           </ul>
@@ -174,6 +109,7 @@ function Layout({ children }) {
         </div>
       </aside>
       <main className="main-content">
+        <WalterJoke />
         {children}
       </main>
     </div>

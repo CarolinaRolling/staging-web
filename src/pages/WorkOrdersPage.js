@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Plus, Search, Calendar, Package, MapPin } from 'lucide-react';
-import { getWorkOrders, createWorkOrder } from '../services/api';
+import { getWorkOrders, createWorkOrder, searchClients, getNextDRNumber, getShipmentById } from '../services/api';
 
 function WorkOrdersPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -19,6 +20,7 @@ function WorkOrdersPage() {
   });
   const [newOrder, setNewOrder] = useState({
     clientName: '',
+    clientId: null,
     clientPurchaseOrderNumber: '',
     contactName: '',
     contactPhone: '',
@@ -28,6 +30,40 @@ function WorkOrdersPage() {
     requestedDueDate: '',
     promisedDate: '',
   });
+  const [clientSuggestions, setClientSuggestions] = useState([]);
+  const [showClientSuggestions, setShowClientSuggestions] = useState(false);
+  const [nextDR, setNextDR] = useState(null);
+  const [useCustomDR, setUseCustomDR] = useState(false);
+  const [customDR, setCustomDR] = useState('');
+  const [linkShipmentId, setLinkShipmentId] = useState(null);
+
+  // Auto-open modal when navigated from inventory with shipment
+  useEffect(() => {
+    const shipmentId = searchParams.get('newFromShipment');
+    if (shipmentId) {
+      setLinkShipmentId(shipmentId);
+      // Fetch next DR number
+      getNextDRNumber().then(res => setNextDR(res.data.data.nextNumber)).catch(() => setNextDR(null));
+      setUseCustomDR(false);
+      setCustomDR('');
+      // Fetch shipment data to pre-fill form
+      getShipmentById(shipmentId).then(res => {
+        const s = res.data.data;
+        setNewOrder(prev => ({
+          ...prev,
+          clientName: s.clientName || '',
+          clientPurchaseOrderNumber: s.clientPurchaseOrderNumber || '',
+          notes: s.description ? `Received: ${s.description}` : '',
+          receivedBy: s.receivedBy || '',
+        }));
+        setShowNewModal(true);
+      }).catch(() => {
+        setShowNewModal(true);
+      });
+      // Clean the URL param
+      setSearchParams({}, { replace: true });
+    }
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('workorders_statusFilter', statusFilter);
@@ -39,31 +75,58 @@ function WorkOrdersPage() {
 
   useEffect(() => {
     loadOrders();
+    // Auto-refresh every 30 seconds for live progress updates
+    const interval = setInterval(() => {
+      if (!searchQuery) loadOrders(true);
+    }, 30000);
+    return () => clearInterval(interval);
   }, []);
 
-  const loadOrders = async () => {
+  // Server-side search for finding orders across all statuses (including shipped/archived)
+  useEffect(() => {
+    if (!searchQuery || searchQuery.length < 2) {
+      // Reset to normal active orders when search is cleared
+      if (searchQuery === '' && !loading) loadOrders();
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setLoading(true);
+        const response = await getWorkOrders({ search: searchQuery, limit: 100 });
+        setOrders(response.data.data || []);
+      } catch (err) {
+        console.error('Search failed:', err);
+      } finally {
+        setLoading(false);
+      }
+    }, 400); // debounce
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const loadOrders = async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const response = await getWorkOrders();
       setOrders(response.data.data || []);
     } catch (err) {
-      setError('Failed to load work orders');
+      if (!silent) setError('Failed to load work orders');
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   const getFilteredOrders = () => {
     let filtered = [...orders];
 
-    // Filter by status
-    if (statusFilter !== 'all') {
+    // Filter by status (skip when searching — show all matching statuses)
+    if (statusFilter !== 'all' && !searchQuery) {
       filtered = filtered.filter(o => o.status === statusFilter);
     }
 
-    // Filter by search query
-    if (searchQuery) {
+    // Filter by search query (only for local filtering when search < 2 chars)
+    // Server-side search handles 2+ char queries — don't double-filter
+    if (searchQuery && searchQuery.length < 2) {
       const query = searchQuery.toLowerCase();
       filtered = filtered.filter(o =>
         o.clientName?.toLowerCase().includes(query) ||
@@ -77,8 +140,8 @@ function WorkOrdersPage() {
     // Sort
     filtered.sort((a, b) => {
       // Rush orders always go to top
-      const aRush = a.parts?.some(p => p.partType === 'rush_service') && !['stored', 'completed', 'shipped', 'picked_up', 'archived'].includes(a.status);
-      const bRush = b.parts?.some(p => p.partType === 'rush_service') && !['stored', 'completed', 'shipped', 'picked_up', 'archived'].includes(b.status);
+      const aRush = a.parts?.some(p => p.partType === 'rush_service') && !['stored', 'completed', 'shipped', 'archived'].includes(a.status);
+      const bRush = b.parts?.some(p => p.partType === 'rush_service') && !['stored', 'completed', 'shipped', 'archived'].includes(b.status);
       if (aRush && !bRush) return -1;
       if (!aRush && bRush) return 1;
 
@@ -114,10 +177,17 @@ function WorkOrdersPage() {
     }
     try {
       setSaving(true);
-      const response = await createWorkOrder(newOrder);
+      const payload = {
+        ...newOrder,
+        assignDRNumber: !useCustomDR,
+        customDRNumber: useCustomDR && customDR ? parseInt(customDR) : null,
+        shipmentIds: linkShipmentId ? [linkShipmentId] : []
+      };
+      const response = await createWorkOrder(payload);
       setShowNewModal(false);
+      setLinkShipmentId(null);
       setNewOrder({
-        clientName: '', clientPurchaseOrderNumber: '', contactName: '',
+        clientName: '', clientId: null, clientPurchaseOrderNumber: '', contactName: '',
         contactPhone: '', contactEmail: '', notes: '', receivedBy: '',
         requestedDueDate: '', promisedDate: ''
       });
@@ -143,7 +213,6 @@ function WorkOrdersPage() {
       draft: { bg: '#e3f2fd', text: '#1565c0', label: 'Received' },
       in_progress: { bg: '#e1f5fe', text: '#0288d1', label: 'Processing' },
       completed: { bg: '#e8f5e9', text: '#2e7d32', label: 'Stored' },
-      picked_up: { bg: '#f3e5f5', text: '#7b1fa2', label: 'Shipped' }
     };
     const style = colors[status] || colors.received;
     return (
@@ -166,7 +235,6 @@ function WorkOrdersPage() {
       case 'stored':
       case 'completed': return '#388e3c';
       case 'shipped':
-      case 'picked_up': return '#7b1fa2';
       case 'processing':
       case 'in_progress': return '#0288d1';
       case 'waiting_for_materials': return '#f57c00';
@@ -176,7 +244,8 @@ function WorkOrdersPage() {
 
   const formatDate = (dateStr) => {
     if (!dateStr) return null;
-    return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const d = typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr + 'T12:00:00' : dateStr;
+    return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
   const filteredOrders = getFilteredOrders();
@@ -197,7 +266,12 @@ function WorkOrdersPage() {
           <h1 className="page-title">Work Orders</h1>
           <p style={{ color: '#666' }}>{orders.length} total orders</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowNewModal(true)}>
+        <button className="btn btn-primary" onClick={async () => {
+          setShowNewModal(true);
+          try { const res = await getNextDRNumber(); setNextDR(res.data.data.nextNumber); } catch { setNextDR(null); }
+          setUseCustomDR(false);
+          setCustomDR('');
+        }}>
           <Plus size={20} /> New Work Order
         </button>
       </div>
@@ -266,7 +340,7 @@ function WorkOrdersPage() {
       ) : (
         <div className="grid grid-3">
           {filteredOrders.map((order) => {
-            const isRush = order.parts?.some(p => p.partType === 'rush_service') && !['stored', 'completed', 'shipped', 'picked_up', 'archived'].includes(order.status);
+            const isRush = order.parts?.some(p => p.partType === 'rush_service') && !['stored', 'completed', 'shipped', 'archived'].includes(order.status);
             return (
             <div
               key={order.id}
@@ -342,11 +416,43 @@ function WorkOrdersPage() {
                 </div>
               )}
 
-              {/* Parts Count */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#666', fontSize: '0.85rem', marginBottom: 8 }}>
-                <Package size={14} />
-                <span>{order.parts?.length || 0} part{(order.parts?.length || 0) !== 1 ? 's' : ''}</span>
-              </div>
+              {/* Parts Progress */}
+              {(() => {
+                const totalParts = order.parts?.length || 0;
+                const completedParts = (order.parts || []).filter(p => p.status === 'completed').length;
+                const inProgressParts = (order.parts || []).filter(p => p.status === 'in_progress').length;
+                const pct = totalParts > 0 ? Math.round((completedParts / totalParts) * 100) : 0;
+                const isShippedOrArchived = ['shipped', 'archived'].includes(order.status);
+                const displayPct = isShippedOrArchived ? 100 : pct;
+                const displayCompleted = isShippedOrArchived ? totalParts : completedParts;
+                return (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                      <span style={{ fontSize: '0.8rem', color: '#666', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Package size={13} />
+                        {displayCompleted}/{totalParts} part{totalParts !== 1 ? 's' : ''} complete
+                      </span>
+                      <span style={{ fontSize: '0.75rem', fontWeight: 700, color: displayPct === 100 ? '#2e7d32' : displayPct > 0 ? '#1565c0' : '#999' }}>
+                        {displayPct}%
+                      </span>
+                    </div>
+                    <div style={{ height: 6, background: '#e0e0e0', borderRadius: 3, overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${displayPct}%`,
+                        background: displayPct === 100 ? '#4caf50' : '#1976d2',
+                        borderRadius: 3,
+                        transition: 'width 0.5s ease'
+                      }} />
+                    </div>
+                    {inProgressParts > 0 && !isShippedOrArchived && (
+                      <div style={{ fontSize: '0.7rem', color: '#0288d1', marginTop: 2 }}>
+                        {inProgressParts} in progress
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Storage Location */}
               {order.storageLocation && (
@@ -377,25 +483,98 @@ function WorkOrdersPage() {
 
       {/* New Work Order Modal */}
       {showNewModal && (
-        <div className="modal-overlay" onClick={() => setShowNewModal(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 500 }}>
+        <div className="modal-overlay" onClick={() => { setShowNewModal(false); setLinkShipmentId(null); }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
             <div className="modal-header">
               <h3 className="modal-title">New Work Order</h3>
-              <button className="modal-close" onClick={() => setShowNewModal(false)}>&times;</button>
+              <button className="modal-close" onClick={() => { setShowNewModal(false); setLinkShipmentId(null); }}>&times;</button>
             </div>
             <form onSubmit={handleCreateOrder}>
               <div className="modal-body">
-                <div className="form-group">
+
+                {/* Shipment linking banner */}
+                {linkShipmentId && (
+                  <div style={{ background: '#e8f5e9', padding: 10, borderRadius: 8, marginBottom: 12, fontSize: '0.85rem', color: '#2e7d32', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Package size={16} />
+                    <span>This work order will be linked to the receiving record</span>
+                  </div>
+                )}
+
+                {/* DR Number Preview */}
+                <div style={{ background: '#e3f2fd', padding: 14, borderRadius: 8, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#666' }}>DR Number</div>
+                    <div style={{ fontWeight: 700, fontSize: '1.3rem', color: '#1565c0' }}>
+                      DR-{useCustomDR ? (customDR || '?') : (nextDR || '...')}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '0.85rem' }}>
+                      <input type="checkbox" checked={useCustomDR} onChange={(e) => { setUseCustomDR(e.target.checked); if (!e.target.checked) setCustomDR(''); }} />
+                      <span>Use different DR#</span>
+                    </label>
+                    {useCustomDR && (
+                      <input type="number" className="form-input" value={customDR}
+                        onChange={(e) => setCustomDR(e.target.value)}
+                        placeholder="Enter DR#" autoFocus
+                        style={{ width: 120, marginTop: 4, textAlign: 'right', fontWeight: 700, fontSize: '1rem' }}
+                      />
+                    )}
+                  </div>
+                </div>
+
+                {/* Client Name with Autofill */}
+                <div className="form-group" style={{ position: 'relative' }}>
                   <label className="form-label">Client Name *</label>
                   <input
                     type="text"
                     className="form-input"
                     value={newOrder.clientName}
-                    onChange={(e) => setNewOrder({ ...newOrder, clientName: e.target.value })}
+                    onChange={async (e) => {
+                      const val = e.target.value;
+                      setNewOrder({ ...newOrder, clientName: val, clientId: null });
+                      if (val.length >= 1) {
+                        try {
+                          const res = await searchClients(val);
+                          setClientSuggestions(res.data.data || []);
+                          setShowClientSuggestions(true);
+                        } catch { setClientSuggestions([]); }
+                      } else {
+                        setClientSuggestions([]);
+                        setShowClientSuggestions(false);
+                      }
+                    }}
+                    onFocus={async () => {
+                      try { const res = await searchClients(''); setClientSuggestions(res.data.data || []); setShowClientSuggestions(true); } catch {}
+                    }}
+                    onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
                     required
-                    autoFocus
+                    autoComplete="off"
+                    placeholder="Start typing to search clients..."
                   />
+                  {showClientSuggestions && clientSuggestions.length > 0 && (
+                    <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: 'white', border: '1px solid #ddd', borderRadius: 4, maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+                      {clientSuggestions.map(c => (
+                        <div key={c.id} style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #eee' }}
+                          onMouseDown={() => {
+                            setNewOrder(prev => ({
+                              ...prev,
+                              clientName: c.name,
+                              clientId: c.id,
+                              contactName: c.contactName || prev.contactName,
+                              contactPhone: c.contactPhone || prev.contactPhone,
+                              contactEmail: c.contactEmail || prev.contactEmail,
+                            }));
+                            setShowClientSuggestions(false);
+                          }}>
+                          <strong>{c.name}</strong>
+                          {c.contactName && <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: 8 }}>{c.contactName}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
+
                 <div className="form-group">
                   <label className="form-label">Client PO Number</label>
                   <input
@@ -403,6 +582,7 @@ function WorkOrdersPage() {
                     className="form-input"
                     value={newOrder.clientPurchaseOrderNumber}
                     onChange={(e) => setNewOrder({ ...newOrder, clientPurchaseOrderNumber: e.target.value })}
+                    placeholder="Enter client's PO number..."
                   />
                 </div>
                 <div className="grid grid-2">
@@ -424,6 +604,15 @@ function WorkOrdersPage() {
                       onChange={(e) => setNewOrder({ ...newOrder, contactPhone: e.target.value })}
                     />
                   </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Contact Email</label>
+                  <input
+                    type="email"
+                    className="form-input"
+                    value={newOrder.contactEmail}
+                    onChange={(e) => setNewOrder({ ...newOrder, contactEmail: e.target.value })}
+                  />
                 </div>
                 <div className="grid grid-2">
                   <div className="form-group">
@@ -456,11 +645,11 @@ function WorkOrdersPage() {
                 </div>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowNewModal(false)}>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowNewModal(false); setLinkShipmentId(null); }}>
                   Cancel
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={saving}>
-                  {saving ? 'Creating...' : 'Create Work Order'}
+                  {saving ? 'Creating...' : `Create Work Order (DR-${useCustomDR ? (customDR || '?') : (nextDR || '...')})`}
                 </button>
               </div>
             </form>

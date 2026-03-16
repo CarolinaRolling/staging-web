@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Upload, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { searchVendors, getSettings, createVendor } from '../services/api';
+import HeatNumberInput from './HeatNumberInput';
 
 const THICKNESS_OPTIONS = [
   '24 ga', '20 ga', '16 ga', '14 ga', '12 ga', '11 ga', '10 ga',
@@ -217,7 +218,9 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
     }); });
   }, [largeDia, largeDiaType, largeDiaMeasure, smallDia, smallDiaType, smallDiaMeasure, coneHeight, radialSegments, showAdvanced, heightCutMethod, heightSegments, customCuts, segmentSpecs, coneType, eccentricAngle]);
 
-  useEffect(function() { var total = heightSegs.length * (parseInt(radialSegments) || 1); setPartData(function(p) { return Object.assign({}, p, { quantity: String(total) }); }); }, [radialSegments, heightSegs]);
+  var coneCount = parseInt(partData._coneCount) || 1;
+  var segPerCone = heightSegs.length * (parseInt(radialSegments) || 1);
+  useEffect(function() { var total = segPerCone * coneCount; setPartData(function(p) { return Object.assign({}, p, { quantity: String(total) }); }); }, [radialSegments, heightSegs, coneCount]);
 
   var materialDescription = useMemo(function() {
     var parts = [];
@@ -235,12 +238,12 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
 
   var rollingDescription = useMemo(function() {
     if (!coneData) return '';
-    var rS = parseInt(radialSegments) || 1, l = [];
-    // Line 1: Cone type
-    if (coneType === 'eccentric') {
-      l.push('Eccentric' + (eccentricAngle ? ' = ' + eccentricAngle + ' deg' : ''));
+    var rS = parseInt(radialSegments) || 1, cc = parseInt(coneCount) || 1, l = [];
+    // Line 1: Cone type + count
+    if (cc > 1) {
+      l.push(cc + ' Cones - ' + (coneType === 'eccentric' ? 'Eccentric' + (eccentricAngle ? ' = ' + eccentricAngle + ' deg' : '') : 'Concentric'));
     } else {
-      l.push('Concentric');
+      l.push(coneType === 'eccentric' ? 'Eccentric' + (eccentricAngle ? ' = ' + eccentricAngle + ' deg' : '') : 'Concentric');
     }
     // Line 2: Segment info (only if segmented)
     if (rS > 1) {
@@ -251,8 +254,13 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
       l.push(heightSegs.length + ' layers');
       segmentSpecs.forEach(function(s) { l.push('  L' + s.layer + ': ' + s.segmentAngle.toFixed(1) + ' deg - Sheet ' + s.sheetWidth + '"x' + s.sheetHeight + '" | OR:' + s.outerRadius.toFixed(1) + '" IR:' + s.innerRadius.toFixed(1) + '"'); });
     }
+    // Total pieces summary
+    var segPerCone = heightSegs.length * rS;
+    if (cc > 1) {
+      l.push(cc + ' cones x ' + segPerCone + ' segments = ' + (cc * segPerCone) + ' total pieces');
+    }
     return l.join('\n');
-  }, [coneData, coneType, eccentricAngle, radialSegments, heightSegs, segmentSpecs]);
+  }, [coneData, coneType, eccentricAngle, radialSegments, coneCount, heightSegs, segmentSpecs]);
 
   useEffect(function() {
     var u = { materialDescription: materialDescription };
@@ -282,11 +290,20 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
 
   return (
     <>
-      {/* QUANTITY */}
+      {/* QUANTITY = Number of Cones */}
       <div className="form-group">
-        <label className="form-label">Total Pieces</label>
-        <input type="number" className="form-input" value={partData.quantity} style={{ background: '#e8f5e9', fontWeight: 600 }} disabled />
-        <div style={{ fontSize: '0.75rem', color: '#2e7d32', marginTop: 2 }}>🔺 Auto: {heightSegs.length} layer(s) × {radialSegments} seg(s) = {heightSegs.length * (parseInt(radialSegments) || 1)}</div>
+        <label className="form-label">Quantity (Cones)</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <input type="number" className="form-input" min="1"
+            value={coneCount}
+            onFocus={function(e) { e.target.select(); }}
+            onChange={function(e) { setPartData(Object.assign({}, partData, { _coneCount: Math.max(1, parseInt(e.target.value) || 1) })); }}
+            style={{ width: 70, textAlign: 'center', fontWeight: 700, fontSize: '1.1rem' }} />
+          <span style={{ fontSize: '0.85rem', color: '#555' }}>
+            × <strong style={{ color: '#2e7d32' }}>{segPerCone}</strong> segment{segPerCone !== 1 ? 's' : ''} per cone
+            = <strong style={{ color: '#1565c0', fontSize: '1rem' }}>{coneCount * segPerCone}</strong> total piece{coneCount * segPerCone !== 1 ? 's' : ''}
+          </span>
+        </div>
       </div>
 
       {/* THICKNESS */}
@@ -395,7 +412,7 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
       {/* SEGMENT DETAILS — concentric only */}
       {segmentSpecs.length > 0 && coneType === 'concentric' && (
         <div style={secStyle}>
-          {secHead('📋', 'Segment Details (' + segmentSpecs.length + ' layer' + (segmentSpecs.length > 1 ? 's' : '') + ' \u00d7 ' + radialSegments + ' seg' + (radialSegments > 1 ? 's' : '') + ')', '#2e7d32')}
+          {secHead('📋', 'Segment Details (' + segmentSpecs.length + ' layer' + (segmentSpecs.length > 1 ? 's' : '') + ' \u00d7 ' + radialSegments + ' seg' + (radialSegments > 1 ? 's' : '') + (coneCount > 1 ? ' \u00d7 ' + coneCount + ' cones' : '') + ')', '#2e7d32')}
           {segmentSpecs.map(function(sp) { return (
             <div key={sp.layer} style={{ background: '#f0fdf4', padding: 12, borderRadius: 8, marginBottom: 8, border: '1px solid #bbf7d0' }}>
               <div style={{ fontWeight: 700, color: '#166534', marginBottom: 6, fontSize: '0.9rem' }}>Layer {sp.layer}: {sp.bottomHeight.toFixed(2)}" → {sp.topHeight.toFixed(2)}"</div>
@@ -476,9 +493,10 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
             {(selGrd === 'Custom' || isCustomGrd) && <input className="form-input" style={{ marginTop: 4 }} placeholder="Enter grade" value={isCustomGrd ? partData.material : customGrade} onChange={function(e) { setCustomGrade(e.target.value); setPartData(Object.assign({}, partData, { material: e.target.value })); }} />}
           </div>
           <div className="form-group"><label className="form-label">Origin</label><select className="form-select" value={partData._materialOrigin || ''} onChange={function(e) { setPartData(Object.assign({}, partData, { _materialOrigin: e.target.value })); }}><option value="">Select...</option><option value="Domestic">Domestic</option><option value="Import">Import</option></select></div>
-          <div className="form-group"><label className="form-label">Material Source</label><select className="form-select" value={partData.materialSource || 'customer_supplied'} onChange={function(e) { setPartData(Object.assign({}, partData, { materialSource: e.target.value })); }}><option value="customer_supplied">Client Supplies</option><option value="we_order">We Order</option></select></div>
+          <div className="form-group"><label className="form-label">Material Source</label><select className="form-select" value={partData.materialSource || 'customer_supplied'} onChange={function(e) { setPartData(Object.assign({}, partData, { materialSource: e.target.value })); }}><option value="customer_supplied">Client Supplies</option><option value="we_order">We Order</option><option value="in_stock">In Stock (We Supply)</option></select></div>
         </div>
         {partData.materialSource === 'we_order' && (
+          <>
           <div className="form-group" style={{ position: 'relative', marginTop: 8 }}>
             <label className="form-label">Vendor</label>
             <input className="form-input" value={partData._vendorSearch !== undefined ? partData._vendorSearch : (partData.vendor ? partData.vendor.name : partData.supplierName || '')}
@@ -487,13 +505,21 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
               onBlur={function() { setTimeout(function() { setShowVendorSuggestions(false); }, 200); }} placeholder="Search or add vendor..." autoComplete="off" />
             {showVendorSuggestions && (
               <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: 'white', border: '1px solid #ddd', borderRadius: 4, maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
-                {vendorSuggestions.map(function(v) { return <div key={v.id} style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #eee' }} onMouseDown={function() { setPartData(Object.assign({}, partData, { vendorId: v.id, supplierName: v.name, _vendorSearch: undefined })); setShowVendorSuggestions(false); }}><strong>{v.name}</strong>{v.contactPhone && <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: 8 }}>{v.contactPhone}</span>}</div>; })}
+                {vendorSuggestions.map(function(v) { return <div key={v.id} style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #eee' }} onMouseDown={function() { setPartData(Object.assign({}, partData, { vendorId: v.id, supplierName: v.name, vendor: null, _vendorSearch: undefined })); setShowVendorSuggestions(false); }}><strong>{v.name}</strong>{v.contactPhone && <span style={{ fontSize: '0.8rem', color: '#666', marginLeft: 8 }}>{v.contactPhone}</span>}</div>; })}
                 {partData._vendorSearch && partData._vendorSearch.length >= 2 && !vendorSuggestions.some(function(v) { return v.name.toLowerCase() === (partData._vendorSearch || '').toLowerCase(); }) && (
-                  <div style={{ padding: '8px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600 }} onMouseDown={async function() { try { var resp = await createVendor({ name: partData._vendorSearch }); if (resp.data.data) { setPartData(Object.assign({}, partData, { vendorId: resp.data.data.id, supplierName: resp.data.data.name, _vendorSearch: undefined })); showMessage('Vendor "' + resp.data.data.name + '" created'); } } catch(x) { setError('Failed to create vendor'); } setShowVendorSuggestions(false); }}>+ Add "{partData._vendorSearch}" as new vendor</div>
+                  <div style={{ padding: '8px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600 }} onMouseDown={async function() { try { var resp = await createVendor({ name: partData._vendorSearch }); if (resp.data.data) { setPartData(Object.assign({}, partData, { vendorId: resp.data.data.id, supplierName: resp.data.data.name, vendor: null, _vendorSearch: undefined })); showMessage('Vendor "' + resp.data.data.name + '" created'); } } catch(x) { setError('Failed to create vendor'); } setShowVendorSuggestions(false); }}>+ Add "{partData._vendorSearch}" as new vendor</div>
                 )}
               </div>
             )}
           </div>
+        
+          <div className="form-group" style={{ marginTop: 8 }}>
+            <label className="form-label">Vendor Estimate #</label>
+            <input className="form-input" value={partData.vendorEstimateNumber || ''}
+              onChange={(e) => setPartData({ ...partData, vendorEstimateNumber: e.target.value })}
+              placeholder="Optional - vendor's quote/estimate number" />
+          </div>
+          </>
         )}
         <div className="form-group" style={{ marginTop: 12 }}><label className="form-label">Material Description (for ordering)</label><textarea className="form-textarea" value={partData.materialDescription || ''} onChange={function(e) { setPartData(Object.assign({}, partData, { materialDescription: e.target.value })); }} rows={2} style={{ fontFamily: 'monospace', fontSize: '0.9rem' }} /><div style={{ fontSize: '0.75rem', color: '#999', marginTop: 2 }}>Auto-generated — edit as needed</div></div>
       </div>
@@ -518,7 +544,7 @@ export default function ConeRollForm({ partData, setPartData, vendorSuggestions,
         {secHead('🏷️', 'Tracking', '#616161')}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div className="form-group"><label className="form-label">Client Part Number</label><input type="text" className="form-input" value={partData.clientPartNumber || ''} onChange={function(e) { setPartData(Object.assign({}, partData, { clientPartNumber: e.target.value })); }} placeholder="Optional" /></div>
-          <div className="form-group"><label className="form-label">Heat Number</label><input type="text" className="form-input" value={partData.heatNumber || ''} onChange={function(e) { setPartData(Object.assign({}, partData, { heatNumber: e.target.value })); }} placeholder="Optional" /></div>
+          <HeatNumberInput partData={partData} setPartData={setPartData} />
         </div>
       </div>
     </>

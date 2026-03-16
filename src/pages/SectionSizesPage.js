@@ -411,7 +411,7 @@ function SectionSizesPage() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button className="btn btn-outline" onClick={() => navigate('/settings')} style={{ padding: '6px 10px' }}>
+          <button className="btn btn-outline" onClick={() => navigate('/admin/settings')} style={{ padding: '6px 10px' }}>
             <ArrowLeft size={18} />
           </button>
           <h1 style={{ margin: 0 }}>Section Sizes</h1>

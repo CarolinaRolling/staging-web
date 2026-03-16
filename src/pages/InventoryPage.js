@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, MapPin, Calendar, Package, Truck, CheckCircle, Clock, FileText, Inbox, Image, AlertCircle } from 'lucide-react';
-import { getWorkOrders, getArchivedWorkOrders, getUnlinkedShipments, linkShipmentToWorkOrder, getRecentlyCompletedOrders } from '../services/api';
+import { getWorkOrders, getUnlinkedShipments, getRecentlyCompletedOrders, getLowStockSupplies } from '../services/api';
 
 // Status configuration
 const STATUSES = {
@@ -12,7 +12,6 @@ const STATUSES = {
   processing: { label: 'Processing', color: '#0288d1', bg: '#e1f5fe' },
   stored: { label: 'Stored', color: '#388e3c', bg: '#e8f5e9' },
   shipped: { label: 'Shipped', color: '#7b1fa2', bg: '#f3e5f5' },
-  picked_up: { label: 'Picked Up', color: '#7b1fa2', bg: '#f3e5f5' },
   archived: { label: 'Archived', color: '#616161', bg: '#eeeeee' },
   // Legacy status mappings
   draft: { label: 'Received', color: '#1976d2', bg: '#e3f2fd' },
@@ -25,12 +24,15 @@ function InventoryPage() {
   const [workOrders, setWorkOrders] = useState([]);
   const [unlinkedShipments, setUnlinkedShipments] = useState([]);
   const [recentlyCompleted, setRecentlyCompleted] = useState([]);
+  const [lowStockSupplies, setLowStockSupplies] = useState([]);
   const [dismissedCompletions, setDismissedCompletions] = useState(() => {
     try { return JSON.parse(localStorage.getItem('dismissed_completions') || '[]'); } catch { return []; }
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null); // null = not searching, [] = no results
+  const [searching, setSearching] = useState(false);
   
   const [statusFilter, setStatusFilter] = useState(() => {
     return localStorage.getItem('inventory_statusFilter') || 'active';
@@ -49,58 +51,73 @@ function InventoryPage() {
 
   useEffect(() => {
     loadWorkOrders();
+    // Auto-refresh every 30 seconds for live progress updates
+    const interval = setInterval(() => {
+      loadWorkOrders(true);
+    }, 30000);
+    return () => clearInterval(interval);
   }, [statusFilter]);
 
-  const loadWorkOrders = async () => {
+  const loadWorkOrders = async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       setError(null);
-      let response;
-      if (statusFilter === 'archived') {
-        try {
-          response = await getArchivedWorkOrders();
-        } catch (archiveErr) {
-          console.error('Archived endpoint failed, trying fallback:', archiveErr);
-          // Fallback: get all work orders and filter client-side
-          response = await getWorkOrders({ archived: 'true' });
-        }
-      } else {
-        response = await getWorkOrders({ archived: 'false' });
-      }
+      const response = await getWorkOrders({ 
+        archived: statusFilter === 'archived' ? 'true' : 'false',
+        view: 'list'
+      });
       setWorkOrders(response.data.data || []);
       
-      // Also load unlinked shipments
-      try {
-        const unlinkedRes = await getUnlinkedShipments();
-        setUnlinkedShipments(unlinkedRes.data.data || []);
-      } catch (e) {
-        console.error('Failed to load unlinked shipments:', e);
-      }
-      
-      // Load recently completed orders (shop floor notifications)
-      try {
-        const completedRes = await getRecentlyCompletedOrders();
-        setRecentlyCompleted(completedRes.data.data || []);
-      } catch (e) {
-        console.error('Failed to load recently completed:', e);
+      // Only load unlinked/recently-completed when viewing active orders
+      if (statusFilter !== 'archived') {
+        try {
+          const [unlinkedRes, completedRes, lowStockRes] = await Promise.all([
+            getUnlinkedShipments(),
+            getRecentlyCompletedOrders(),
+            getLowStockSupplies()
+          ]);
+          setUnlinkedShipments(unlinkedRes.data.data || []);
+          setRecentlyCompleted(completedRes.data.data || []);
+          setLowStockSupplies(lowStockRes.data.data || []);
+        } catch (e) {
+          console.error('Failed to load supplementary data:', e);
+        }
       }
     } catch (err) {
-      setError('Failed to load inventory');
+      if (!silent) setError('Failed to load inventory');
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
-  const handleCreateWorkOrder = async (shipmentId) => {
-    try {
-      const res = await linkShipmentToWorkOrder(shipmentId);
-      const workOrder = res.data.data.workOrder;
-      navigate(`/workorder/${workOrder.id}`);
-    } catch (err) {
-      console.error('Failed to create work order:', err);
-    }
+  const handleCreateWorkOrder = (shipmentId) => {
+    navigate(`/workorders?newFromShipment=${shipmentId}`);
   };
+
+  // Debounced server-side search across ALL statuses (including archived/shipped)
+  const searchTimer = useRef(null);
+  useEffect(() => {
+    if (!searchQuery || searchQuery.length < 2) {
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const response = await getWorkOrders({ search: searchQuery, limit: 50, view: 'list' });
+        setSearchResults(response.data.data || []);
+      } catch (err) {
+        console.error('Search error:', err);
+        setSearchResults(null);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(searchTimer.current);
+  }, [searchQuery]);
 
   const dismissCompletion = (orderId) => {
     const updated = [...dismissedCompletions, orderId];
@@ -111,6 +128,23 @@ function InventoryPage() {
   const visibleCompletions = recentlyCompleted.filter(o => !dismissedCompletions.includes(o.id));
 
   const getFilteredOrders = () => {
+    // When searching, use server-side results (includes archived/shipped)
+    if (searchQuery && searchQuery.length >= 2 && searchResults !== null) {
+      let filtered = [...searchResults];
+      // Sort
+      filtered.sort((a, b) => {
+        switch (sortBy) {
+          case 'dr_desc': return (b.drNumber || 0) - (a.drNumber || 0);
+          case 'dr_asc': return (a.drNumber || 0) - (b.drNumber || 0);
+          case 'client': return (a.clientName || '').localeCompare(b.clientName || '');
+          case 'date': return new Date(b.createdAt) - new Date(a.createdAt);
+          case 'location': return (a.storageLocation || '').localeCompare(b.storageLocation || '');
+          default: return (b.drNumber || 0) - (a.drNumber || 0);
+        }
+      });
+      return filtered;
+    }
+
     let filtered = [...workOrders];
 
     // Filter by status
@@ -124,7 +158,7 @@ function InventoryPage() {
       filtered = filtered.filter(o => o.status === 'stored' || o.status === 'completed');
     } else if (statusFilter === 'active') {
       // All non-archived, non-shipped, non-picked-up
-      filtered = filtered.filter(o => o.status !== 'archived' && o.status !== 'shipped' && o.status !== 'picked_up');
+      filtered = filtered.filter(o => o.status !== 'archived' && o.status !== 'shipped');
     }
 
     // Filter by search query
@@ -193,7 +227,8 @@ function InventoryPage() {
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
-    return new Date(dateString).toLocaleDateString('en-US', {
+    const d = typeof dateString === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateString) ? dateString + 'T12:00:00' : dateString;
+    return new Date(d).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
@@ -303,16 +338,24 @@ function InventoryPage() {
       {/* Search and Sort */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-          <div className="search-box" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}>
+          <div className="search-box" style={{ flex: 1, minWidth: 200, marginBottom: 0, position: 'relative' }}>
             <Search size={18} className="search-box-icon" />
             <input
               type="text"
-              placeholder="Search by DR#, client, PO#, location..."
+              placeholder="Search by DR#, client, PO#, estimate#, location..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="search-box-input"
             />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery('')} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#999', fontSize: '1.1rem', padding: 4 }}>✕</button>
+            )}
           </div>
+          {searchQuery && searchQuery.length >= 2 && (
+            <span style={{ fontSize: '0.8rem', color: '#1565c0', fontWeight: 600, whiteSpace: 'nowrap' }}>
+              {searching ? '⏳ Searching...' : `🔍 All statuses (${filteredOrders.length} found)`}
+            </span>
+          )}
           <select 
             className="form-select" 
             value={sortBy} 
@@ -333,7 +376,85 @@ function InventoryPage() {
         {filteredOrders.length} item{filteredOrders.length !== 1 ? 's' : ''}
       </div>
 
+      {/* Material Needs Ordering Warning */}
+      {(() => {
+        const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
+        const needsMaterialOrders = workOrders.filter(wo => {
+          if (['shipped', 'archived'].includes(wo.status)) return false;
+          return wo.parts?.some(p => 
+            p.materialSource === 'we_order' && 
+            !p.materialOrdered && 
+            !SERVICE_TYPES.includes(p.partType)
+          );
+        });
+        if (needsMaterialOrders.length === 0) return null;
+        return (
+          <div style={{
+            background: '#fff3e0', border: '2px solid #ff9800', borderRadius: 8,
+            padding: '14px 18px', marginBottom: 16
+          }}>
+            <div style={{ fontWeight: 700, color: '#e65100', fontSize: '1rem', marginBottom: 8 }}>
+              ⚠️ {needsMaterialOrders.length} Order{needsMaterialOrders.length > 1 ? 's' : ''} Need Material Ordered
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {needsMaterialOrders.map(wo => {
+                const unorderedParts = wo.parts.filter(p => 
+                  p.materialSource === 'we_order' && !p.materialOrdered && !SERVICE_TYPES.includes(p.partType)
+                );
+                return (
+                  <div key={wo.id} role="button" tabIndex={0}
+                    onClick={() => navigate(`/workorder/${wo.id}`)}
+                    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      background: '#fff8e1', padding: '8px 12px', borderRadius: 6, fontSize: '0.9rem', cursor: 'pointer' }}
+                  >
+                    <span>
+                      <strong style={{ color: '#1565c0' }}>{wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber}</strong>
+                      <span style={{ margin: '0 8px', color: '#666' }}>—</span>
+                      <strong>{wo.clientName}</strong>
+                      <span style={{ color: '#888', marginLeft: 8 }}>
+                        ({unorderedParts.length} part{unorderedParts.length > 1 ? 's' : ''} need material)
+                      </span>
+                    </span>
+                    <span style={{ color: '#e65100', fontWeight: 600, fontSize: '0.8rem' }}>ORDER MATERIAL →</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Waiting for Instructions - unlinked shipments */}
+
+      {/* Shop Supplies Low Stock Warning */}
+      {lowStockSupplies.length > 0 && statusFilter !== 'archived' && (
+        <div style={{
+          background: '#fce4ec', border: '2px solid #e91e63', borderRadius: 8,
+          padding: '14px 18px', marginBottom: 16
+        }}>
+          <div style={{ fontWeight: 700, color: '#c2185b', fontSize: '1rem', marginBottom: 8 }}>
+            🛒 {lowStockSupplies.length} Shop Supplie{lowStockSupplies.length > 1 ? 's' : ''} Low / Out of Stock
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {lowStockSupplies.map(item => (
+              <div key={item.id} role="button" tabIndex={0}
+                onClick={() => navigate('/shop-supplies')}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  background: item.quantity === 0 ? '#ffebee' : '#fff8e1', padding: '8px 12px', borderRadius: 6, fontSize: '0.9rem', cursor: 'pointer' }}
+              >
+                <span>
+                  <strong>{item.name}</strong>
+                  {item.category && <span style={{ color: '#888', marginLeft: 8, fontSize: '0.8rem' }}>({item.category})</span>}
+                </span>
+                <span style={{ fontWeight: 700, color: item.quantity === 0 ? '#c62828' : '#e65100' }}>
+                  {item.quantity === 0 ? 'OUT OF STOCK' : `${item.quantity} ${item.unit} left`}
+                  <span style={{ fontWeight: 400, marginLeft: 8, color: '#888', fontSize: '0.8rem' }}>min: {item.minQuantity}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       
       {/* Shop Floor Completed Notifications */}
       {visibleCompletions.length > 0 && statusFilter !== 'archived' && (
@@ -434,13 +555,22 @@ function InventoryPage() {
                     {s.receivedBy && ` • by ${s.receivedBy}`}
                   </div>
                 </div>
-                <button 
-                  className="btn btn-primary" 
-                  style={{ whiteSpace: 'nowrap', fontSize: '0.85rem', padding: '6px 14px' }}
-                  onClick={() => handleCreateWorkOrder(s.id)}
-                >
-                  Create Work Order
-                </button>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button 
+                    className="btn btn-outline" 
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.85rem', padding: '6px 14px' }}
+                    onClick={() => navigate(`/shipment/${s.id}`)}
+                  >
+                    Details
+                  </button>
+                  <button 
+                    className="btn btn-primary" 
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.85rem', padding: '6px 14px' }}
+                    onClick={() => handleCreateWorkOrder(s.id)}
+                  >
+                    Create Work Order
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -532,7 +662,23 @@ function InventoryPage() {
                         </div>
                       )}
                     </div>
-                    {getStatusBadge(order.status)}
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      {order.priority && order.priority !== 'normal' && (
+                        <span style={{
+                          background: order.priority === 'urgent' ? '#c62828' : order.priority === 'high' ? '#e65100' : '#1565c0',
+                          color: 'white',
+                          padding: '4px 10px',
+                          borderRadius: 12,
+                          fontSize: '0.7rem',
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.5px'
+                        }}>
+                          {order.priority === 'urgent' ? '🔴 URGENT' : '🟠 HIGH'}
+                        </span>
+                      )}
+                      {getStatusBadge(order.status)}
+                    </div>
                   </div>
 
                   {/* Client Name */}
@@ -573,18 +719,43 @@ function InventoryPage() {
                     </div>
                   )}
 
-                  {/* Parts count */}
-                  <div style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    gap: 6, 
-                    fontSize: '0.85rem',
-                    color: '#666',
-                    marginBottom: 6
-                  }}>
-                    <Package size={14} />
-                    <span>{order.parts?.length || 0} part{(order.parts?.length || 0) !== 1 ? 's' : ''}</span>
-                  </div>
+                  {/* Parts progress */}
+                  {(() => {
+                    const totalParts = order.parts?.length || 0;
+                    const completedParts = (order.parts || []).filter(p => p.status === 'completed').length;
+                    const inProgressParts = (order.parts || []).filter(p => p.status === 'in_progress').length;
+                    const pct = totalParts > 0 ? Math.round((completedParts / totalParts) * 100) : 0;
+                    const isShippedOrArchived = ['shipped', 'archived'].includes(order.status);
+                    const displayPct = isShippedOrArchived ? 100 : pct;
+                    const displayCompleted = isShippedOrArchived ? totalParts : completedParts;
+                    return (
+                      <div style={{ marginBottom: 6 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                          <span style={{ fontSize: '0.8rem', color: '#666', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Package size={13} />
+                            {displayCompleted}/{totalParts} part{totalParts !== 1 ? 's' : ''} complete
+                          </span>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: displayPct === 100 ? '#2e7d32' : displayPct > 0 ? '#1565c0' : '#999' }}>
+                            {displayPct}%
+                          </span>
+                        </div>
+                        <div style={{ height: 6, background: '#e0e0e0', borderRadius: 3, overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%',
+                            width: `${displayPct}%`,
+                            background: displayPct === 100 ? '#4caf50' : '#1976d2',
+                            borderRadius: 3,
+                            transition: 'width 0.5s ease'
+                          }} />
+                        </div>
+                        {inProgressParts > 0 && !isShippedOrArchived && (
+                          <div style={{ fontSize: '0.7rem', color: '#0288d1', marginTop: 2 }}>
+                            {inProgressParts} in progress
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Shop completion badge */}
                   {order.completedAt && (

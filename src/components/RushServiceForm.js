@@ -54,6 +54,7 @@ export default function RushServiceForm({ partData, setPartData }) {
       const opt = EMERGENCY_OPTIONS.find(o => o.value === emergencyDay);
       descParts.push(`Emergency Off Hour Opening: ${emergencyDay} ($${opt?.fee || 0})`);
     }
+    if (descParts.length === 0) descParts.push('Rush Processing (No Fee)');
     updates.specialInstructions = descParts.join(' | ');
 
     setPartData(prev => ({ ...prev, ...updates }));
@@ -180,7 +181,7 @@ export default function RushServiceForm({ partData, setPartData }) {
       </div>
 
       {/* Summary */}
-      {(expediteEnabled || emergencyEnabled) && (
+      {(expediteEnabled || emergencyEnabled) ? (
         <div style={{ padding: 16, background: '#fff8e1', borderRadius: 8, border: '2px solid #ffcc80' }}>
           <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 8, color: '#e65100' }}>
             <AlertTriangle size={16} style={{ verticalAlign: 'middle', marginRight: 6 }} />
@@ -202,6 +203,19 @@ export default function RushServiceForm({ partData, setPartData }) {
               <strong>Emergency Off Hour Opening:</strong> {emergencyDay} — ${EMERGENCY_OPTIONS.find(o => o.value === emergencyDay)?.fee || 0}
             </div>
           )}
+          <div style={{ fontSize: '0.8rem', color: '#888', marginTop: 8, fontStyle: 'italic' }}>
+            Promise date will be set to today when this part is saved.
+          </div>
+        </div>
+      ) : (
+        <div style={{ padding: 16, background: '#e3f2fd', borderRadius: 8, border: '2px solid #90caf9' }}>
+          <div style={{ fontWeight: 700, fontSize: '1rem', color: '#1565c0' }}>
+            <AlertTriangle size={16} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+            Rush Processing — No Fee
+          </div>
+          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: 6 }}>
+            Order will be flagged as rush with priority handling but no surcharge applied. Enable Expedite or Emergency above to add fees.
+          </div>
           <div style={{ fontSize: '0.8rem', color: '#888', marginTop: 8, fontStyle: 'italic' }}>
             Promise date will be set to today when this part is saved.
           </div>

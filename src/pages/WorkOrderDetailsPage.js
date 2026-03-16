@@ -18,23 +18,24 @@ import PressBrakeForm from '../components/PressBrakeForm';
 import FlatStockForm from '../components/FlatStockForm';
 import FabServiceForm from '../components/FabServiceForm';
 import ShopRateForm from '../components/ShopRateForm';
-import ImportPartsModal from '../components/ImportPartsModal';
+import HeatNumberInput from '../components/HeatNumberInput';
 import { 
   getWorkOrderById, updateWorkOrder, deleteWorkOrder,
   addWorkOrderPart, updateWorkOrderPart, deleteWorkOrderPart,
-  uploadPartFiles, getPartFileSignedUrl, deletePartFile,
-  uploadWorkOrderDocuments, getWorkOrderDocumentSignedUrl, deleteWorkOrderDocument, regeneratePODocument,
+  uploadPartFiles, getPartFileSignedUrl, downloadPartFile, deletePartFile,
+  uploadWorkOrderDocuments, getWorkOrderDocumentSignedUrl, downloadWorkOrderDocument, deleteWorkOrderDocument, regeneratePODocument, createPODocument,
   getShipmentByWorkOrderId, getNextPONumber, orderWorkOrderMaterial,
   searchVendors, searchLinkableEstimates, linkEstimateToWorkOrder, unlinkEstimateFromWorkOrder,
   searchClients, getSettings, getUnlinkedShipments, linkShipmentToWorkOrder, unlinkShipmentFromWorkOrder, duplicateWorkOrderToEstimate,
-  getWorkOrderPrintPackage, updateDRNumber
+  getWorkOrderPrintPackage, updateDRNumber, recordPickup,
+  exportWorkOrderIIF
 } from '../services/api';
 
 const PART_TYPES = {
   plate_roll: { label: 'Plate Roll', icon: '🔩', desc: 'Flat plate rolling with arc calculator', fields: ['material', 'thickness', 'width', 'length', 'rollType', 'radius', 'diameter', 'arcDegrees'] },
   cone_roll: { label: 'Cone Layout', icon: '🔺', desc: 'Cone segment design with AutoCAD export', fields: ['material', 'thickness', 'width', 'length'] },
   angle_roll: { label: 'Angle Roll', icon: '📐', desc: 'Angle iron rolling', fields: ['material', 'sectionSize', 'length', 'rollType', 'radius', 'diameter', 'arcDegrees', 'flangeOut'] },
-  flat_bar: { label: 'Flat Bar', icon: '▬', desc: 'Flat bar bending', fields: ['material', 'thickness', 'width', 'length', 'rollType', 'radius', 'diameter', 'arcDegrees'] },
+  flat_bar: { label: 'Flat & Square Bar', icon: '▬', desc: 'Flat bar and square bar bending', fields: ['material', 'thickness', 'width', 'length', 'rollType', 'radius', 'diameter', 'arcDegrees'] },
   pipe_roll: { label: 'Pipes/Tubes/Round', icon: '🔧', desc: 'Pipe, tube, and solid round bar bending', fields: ['material', 'outerDiameter', 'wallThickness', 'length', 'radius', 'diameter', 'arcDegrees'] },
   tube_roll: { label: 'Square & Rect Tubing', icon: '⬜', desc: 'Square and rectangular tube rolling', fields: ['material', 'sectionSize', 'thickness', 'length', 'rollType', 'radius', 'diameter', 'arcDegrees'] },
   channel_roll: { label: 'Channel', icon: '🔲', desc: 'C-channel rolling', fields: ['material', 'sectionSize', 'length', 'rollType', 'radius', 'diameter', 'arcDegrees', 'flangeOut'] },
@@ -73,12 +74,11 @@ function WorkOrderDetailsPage() {
   const [editingPart, setEditingPart] = useState(null);
   const [partData, setPartData] = useState({});
   const [selectedPartType, setSelectedPartType] = useState('');
-  const [partFormError, setPartFormError] = useState(null);
-  const [showImportModal, setShowImportModal] = useState(false);
-  const [uploadingFiles, setUploadingFiles] = useState(null);
+  const [partFormError, setPartFormError] = useState(null);  const [uploadingFiles, setUploadingFiles] = useState(null);
   const [uploadingDocs, setUploadingDocs] = useState(false);
+  const [uploadingMtrs, setUploadingMtrs] = useState(false);
   const [showPickupModal, setShowPickupModal] = useState(false);
-  const [pickupData, setPickupData] = useState({ pickedUpBy: '' });
+  const [pickupData, setPickupData] = useState({ pickedUpBy: '', type: null, items: {} });
   const [showPrintMenu, setShowPrintMenu] = useState(false);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [orderPONumber, setOrderPONumber] = useState('');
@@ -96,6 +96,7 @@ function WorkOrderDetailsPage() {
   const [laborMinimums, setLaborMinimums] = useState([]);
   const fileInputRefs = useRef({});
   const docInputRef = useRef(null);
+  const mtrInputRef = useRef(null);
   const [defaultTaxRate, setDefaultTaxRate] = useState(9.75);
   const [showLinkShipmentModal, setShowLinkShipmentModal] = useState(false);
   const [unlinkedShipments, setUnlinkedShipments] = useState([]);
@@ -105,7 +106,12 @@ function WorkOrderDetailsPage() {
   const [editingDR, setEditingDR] = useState(false);
   const [drInput, setDrInput] = useState('');
 
-  useEffect(() => { loadOrder(); loadLaborMinimums(); }, [id]);
+  useEffect(() => { 
+    loadOrder(); loadLaborMinimums(); 
+    // Auto-refresh every 30 seconds for live progress updates from shop tablets
+    const interval = setInterval(() => { loadOrder(); }, 30000);
+    return () => clearInterval(interval);
+  }, [id]);
 
   const loadDefaultTaxRate = async () => {
     try {
@@ -119,9 +125,17 @@ function WorkOrderDetailsPage() {
     return 9.75;
   };
 
-  const loadOrder = async () => {
+  const initialLoadDone = useRef(false);
+  
+  const loadOrder = async (opts = {}) => {
+    // Save scroll position before reload
+    const scrollY = window.scrollY;
+    const isReload = initialLoadDone.current;
+    
     try {
-      setLoading(true);
+      // Only show loading spinner on first load, not on reloads
+      if (!isReload) setLoading(true);
+      
       // Load admin default tax rate first
       const adminTaxRate = await loadDefaultTaxRate();
       const response = await getWorkOrderById(id);
@@ -198,6 +212,11 @@ function WorkOrderDetailsPage() {
       setError('Failed to load work order');
     } finally {
       setLoading(false);
+      initialLoadDone.current = true;
+      // Restore scroll position after React re-renders
+      if (isReload) {
+        requestAnimationFrame(() => window.scrollTo(0, scrollY));
+      }
     }
   };
 
@@ -384,10 +403,20 @@ function WorkOrderDetailsPage() {
 
   const handleViewDocument = async (documentId) => {
     try {
-      const response = await getWorkOrderDocumentSignedUrl(id, documentId);
-      window.open(response.data.data.url, '_blank');
+      const response = await downloadWorkOrderDocument(id, documentId);
+      const blob = new Blob([response.data], { type: response.headers['content-type'] || 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      window.open(url, '_blank');
     } catch (err) {
-      setError('Failed to open document');
+      // Fallback: open download URL with token query param
+      try {
+        const token = localStorage.getItem('token');
+        const baseUrl = process.env.REACT_APP_API_URL || '';
+        const url = `${baseUrl}/workorders/${id}/documents/${documentId}/download?token=${token}`;
+        window.open(url, '_blank');
+      } catch {
+        setError('Failed to open document');
+      }
     }
   };
 
@@ -399,6 +428,20 @@ function WorkOrderDetailsPage() {
       showMessage('Document deleted');
     } catch (err) {
       setError('Failed to delete document');
+    }
+  };
+
+  // MTR upload
+  const handleMtrUpload = async (files) => {
+    try {
+      setUploadingMtrs(true);
+      await uploadWorkOrderDocuments(id, files, 'mtr');
+      await loadOrder();
+      showMessage('MTR(s) uploaded');
+    } catch (err) {
+      setError('Failed to upload MTR');
+    } finally {
+      setUploadingMtrs(false);
     }
   };
 
@@ -469,7 +512,7 @@ function WorkOrderDetailsPage() {
 
   // Reorder — duplicate WO to new estimate with cleared material pricing
   const handleReorder = async () => {
-    if (!window.confirm('Create a new estimate from this work order?\n\nAll part specs and labor will be copied. Material pricing will be cleared so you can get updated quotes.')) return;
+    if (!window.confirm(`Create a reorder estimate from this work order?\n\nA new estimate will be created with all part specs and pricing copied from the original estimate${order.estimateNumber ? ` (${order.estimateNumber})` : ''}. You can then update pricing and send to the client.\n\nThe original work order and estimate will not be modified.`)) return;
     try {
       setReordering(true);
       const res = await duplicateWorkOrderToEstimate(id);
@@ -513,6 +556,8 @@ function WorkOrderDetailsPage() {
       serviceWelding: false, serviceWeldingCost: '', serviceWeldingVendor: '', serviceWeldingPercent: 100,
       otherServicesCost: '', otherServicesMarkupPercent: 15
     });
+    setVendorSuggestions([]);
+    setShowVendorSuggestions(false);
     setShowPartModal(true);
   };
 
@@ -520,10 +565,13 @@ function WorkOrderDetailsPage() {
     setEditingPart(part);
     setSelectedPartType(part.partType);
     setPartFormError(null);
+    setVendorSuggestions([]);
+    setShowVendorSuggestions(false);
     // Merge formData back into partData for editing
-    const editData = { ...part, quantity: part.quantity || 1 };
+    const editData = { ...part, quantity: part.quantity || 1, _vendorSearch: undefined };
     if (part.formData && typeof part.formData === 'object') {
       Object.assign(editData, part.formData);
+      delete editData._vendorSearch; // never restore search state from DB
     }
     setPartData(editData);
     setShowPartModal(true);
@@ -570,9 +618,9 @@ function WorkOrderDetailsPage() {
       }
     }
     if (selectedPartType === 'flat_bar') {
-      if (!partData._barSize) warnings.push('Flat bar size is required');
-      if (partData._barSize === 'Custom' && !partData._customBarSize) warnings.push('Custom flat bar size is required');
-      if (!partData.rollType) warnings.push('Roll Direction is required');
+      if (!partData._barSize) warnings.push('Bar size is required');
+      if (partData._barSize === 'Custom' && !partData._customBarSize) warnings.push('Custom bar size is required');
+      if (partData._barShape !== 'square' && !partData.rollType) warnings.push('Roll Direction is required');
       if (!partData._rollToMethod && !partData._rollValue && !partData.radius && !partData.diameter) warnings.push('Roll value is required');
     }
     if (selectedPartType === 'channel_roll') {
@@ -630,14 +678,23 @@ function WorkOrderDetailsPage() {
       
       // Build data matching estimate save flow
       const dataToSend = { partType: selectedPartType, ...partData, quantity: parseInt(partData.quantity) || 1 };
+      // Remove UI-only fields that shouldn't be saved to database
+      delete dataToSend._vendorSearch;
       // Capture shape file before cleaning
       const pendingShapeFile = dataToSend._shapeFile;
       delete dataToSend._shapeFile; // File objects can't be serialized
       
       // Sanitize ENUM fields - empty strings break Postgres ENUMs
       if (!dataToSend.rollType) dataToSend.rollType = null;
-      if (!dataToSend.materialSource || !['we_order', 'customer_supplied'].includes(dataToSend.materialSource)) {
+      if (!dataToSend.materialSource || !['we_order', 'customer_supplied', 'in_stock'].includes(dataToSend.materialSource)) {
         dataToSend.materialSource = 'customer_supplied';
+      }
+      // Clean heatBreakdown — convert qty strings to ints, remove empty rows
+      if (dataToSend.heatBreakdown) {
+        const cleaned = dataToSend.heatBreakdown
+          .filter(r => r.heat && r.heat.trim())
+          .map(r => ({ heat: r.heat.trim(), qty: parseInt(r.qty) || 0 }));
+        dataToSend.heatBreakdown = cleaned.length > 0 ? cleaned : null;
       }
       
       // Recalculate partTotal at save time for ea-priced parts
@@ -655,7 +712,6 @@ function WorkOrderDetailsPage() {
       }
       
       let savedPartId = editingPart?.id;
-      console.log('Saving part data:', dataToSend);
       if (editingPart) {
         await updateWorkOrderPart(id, editingPart.id, dataToSend);
       } else {
@@ -686,6 +742,8 @@ function WorkOrderDetailsPage() {
         setEditingPart(null);
         setPartData({});
         setPartFormError(null);
+        setVendorSuggestions([]);
+        setShowVendorSuggestions(false);
         showMessage('Part added — select next part type');
         setShowPartTypePicker(true);
       } else {
@@ -693,6 +751,8 @@ function WorkOrderDetailsPage() {
         setEditingPart(null);
         setPartData({});
         setPartFormError(null);
+        setVendorSuggestions([]);
+        setShowVendorSuggestions(false);
         showMessage(editingPart ? 'Part updated' : 'Part added');
       }
     } catch (err) {
@@ -712,26 +772,6 @@ function WorkOrderDetailsPage() {
     } catch (err) {
       setError('Failed to delete part');
     }
-  };
-
-  const handleImportParts = async (partDataList, onProgress) => {
-    let imported = 0;
-    for (const pd of partDataList) {
-      try {
-        if (!pd.materialSource || !['we_order', 'customer_supplied'].includes(pd.materialSource)) {
-          pd.materialSource = 'customer_supplied';
-        }
-        if (!pd.rollType) pd.rollType = null;
-        await addWorkOrderPart(id, pd);
-        imported++;
-        if (onProgress) onProgress(imported);
-      } catch (err) {
-        console.error(`Failed to import part ${imported + 1}:`, err);
-        throw new Error(`Failed on part ${imported + 1}: ${err.response?.data?.error?.message || err.message}`);
-      }
-    }
-    await loadOrder();
-    showMessage(`${imported} part${imported !== 1 ? 's' : ''} imported successfully`);
   };
 
   const handlePartStatusChange = async (partId, status) => {
@@ -758,10 +798,20 @@ function WorkOrderDetailsPage() {
 
   const handleViewFile = async (partId, fileId) => {
     try {
-      const response = await getPartFileSignedUrl(id, partId, fileId);
-      window.open(response.url, '_blank');
+      const response = await downloadPartFile(id, partId, fileId);
+      const blob = new Blob([response.data], { type: response.headers['content-type'] || 'application/octet-stream' });
+      const url = window.URL.createObjectURL(blob);
+      window.open(url, '_blank');
     } catch (err) {
-      setError('Failed to open file');
+      // Fallback: open download URL with token query param
+      try {
+        const token = localStorage.getItem('token');
+        const baseUrl = process.env.REACT_APP_API_URL || '';
+        const url = `${baseUrl}/workorders/${id}/parts/${partId}/files/${fileId}/download?token=${token}`;
+        window.open(url, '_blank');
+      } catch {
+        setError('Failed to open file');
+      }
     }
   };
 
@@ -779,19 +829,56 @@ function WorkOrderDetailsPage() {
   const handlePickup = async () => {
     try {
       setError(null);
-      const response = await updateWorkOrder(id, { 
-        status: 'picked_up', 
-        pickedUpBy: pickupData.pickedUpBy, 
-        pickedUpAt: new Date().toISOString() 
-      });
-      console.log('Pickup response:', response);
+      if (pickupData.type === 'full') {
+        await recordPickup(id, { type: 'full', pickedUpBy: pickupData.pickedUpBy });
+      } else {
+        // Build items list from selections
+        const selectedItems = Object.entries(pickupData.items)
+          .filter(([_, v]) => v.selected)
+          .map(([partId, v]) => {
+            const part = order.parts.find(p => p.id === partId);
+            return {
+              partId,
+              partNumber: part?.partNumber,
+              partType: part?.partType,
+              description: part?.materialDescription || part?.sectionSize || PART_TYPES[part?.partType]?.label || part?.partType,
+              quantity: v.useCustomQty ? parseInt(v.customQty) || 0 : (part?.quantity || 1)
+            };
+          })
+          .filter(i => i.quantity > 0);
+        
+        if (selectedItems.length === 0) { setError('Select at least one item'); return; }
+        await recordPickup(id, { type: 'partial', pickedUpBy: pickupData.pickedUpBy, items: selectedItems });
+      }
       await loadOrder();
       setShowPickupModal(false);
-      showMessage('Marked as picked up');
+      setPickupData({ pickedUpBy: '', type: null, items: {} });
+      showMessage(pickupData.type === 'full' ? 'Full pickup recorded' : 'Partial pickup recorded');
     } catch (err) {
       console.error('Pickup error:', err.response?.data || err);
-      setError(err.response?.data?.error?.message || 'Failed to update - check console for details');
+      setError(err.response?.data?.error?.message || 'Failed to record pickup');
     }
+  };
+
+  // Compute remaining quantities per part based on pickup history
+  const getPickupSummary = () => {
+    const history = order?.pickupHistory || [];
+    const parts = order?.parts || [];
+    
+    const pickedByPart = {};
+    history.forEach(entry => {
+      (entry.items || []).forEach(item => {
+        const key = item.partId || `pn-${item.partNumber}`;
+        pickedByPart[key] = (pickedByPart[key] || 0) + (item.quantity || 0);
+      });
+    });
+    
+    return parts.map(p => {
+      const totalQty = p.quantity || 1;
+      const picked = pickedByPart[p.id] || pickedByPart[`pn-${p.partNumber}`] || 0;
+      const remaining = Math.max(0, totalQty - picked);
+      return { ...p, totalQty, picked, remaining };
+    });
   };
 
   // Helper: build work order print HTML
@@ -823,7 +910,7 @@ function WorkOrderDetailsPage() {
       order.documents.forEach(doc => {
         if (doc.documentType === 'purchase_order') {
           purchaseOrderUrls.push({ url: doc.url, name: doc.originalName });
-        } else {
+        } else if (doc.documentType !== 'mtr') {
           orderDocUrls.push({ url: doc.url, name: doc.originalName });
         }
       });
@@ -894,7 +981,21 @@ function WorkOrderDetailsPage() {
       }
 
       // Build rolling description block from _rollingDescription (already formatted)
-      const rollingDescFull = part._rollingDescription || '';
+      // FIX: The _rollingDescription text in formData may have stale EW/HW direction.
+      // Correct it using the actual rollType database field.
+      let rollingDescFull = part._rollingDescription || '';
+      if (rollingDescFull && part.rollType) {
+        const correctDir = getRollDir(part); // Uses actual rollType from DB
+        if (correctDir) {
+          // Replace wrong direction abbreviations with correct one
+          const allDirs = ['EW', 'HW', 'OE', 'SO', 'SI', 'SU'];
+          const dirRegex = new RegExp('\\b(' + allDirs.join('|') + ')\\b', 'g');
+          const matches = rollingDescFull.match(dirRegex);
+          if (matches && matches.length > 0 && !matches.includes(correctDir)) {
+            rollingDescFull = rollingDescFull.replace(dirRegex, correctDir);
+          }
+        }
+      }
       let rollingBlock = '';
       const rollingLines = [];
       
@@ -922,14 +1023,29 @@ function WorkOrderDetailsPage() {
           rollingLines.push(`${part._ringsNeeded} complete ring(s) required`);
         }
         rollingBlock = `
-          <div style="background:#e8f5e9;padding:10px 12px;border-radius:4px;border-left:4px solid #2e7d32;margin-top:6px">
-            <pre style="white-space:pre-wrap;margin:0;font-family:'Courier New',monospace;font-size:0.95rem;font-weight:bold;color:#1B5E20;line-height:1.5">${rollingLines.join('\n')}</pre>
+          <div style="background:#e8f5e9;padding:6px 10px;border-radius:4px;border-left:3px solid #2e7d32;margin-top:4px">
+            <pre style="white-space:pre-wrap;margin:0;font-family:'Courier New',monospace;font-size:0.9rem;font-weight:bold;color:#1B5E20;line-height:1.4">${rollingLines.join('\n')}</pre>
           </div>
         `;
       }
 
       // Cone segment breakdown for print
       let coneSegmentBlock = '';
+
+      // Orientation diagram for angle/channel rolls
+      let orientationBlock = '';
+      if ((part.partType === 'angle_roll' || part.partType === 'channel_roll') && part._orientationOption) {
+        const imgPrefix = part.partType === 'channel_roll' ? 'Channel' : '';
+        const imgFile = part.rollType === 'easy_way' ? `${imgPrefix}EWODOp${part._orientationOption}.png` : `${imgPrefix}HWIDOp${part._orientationOption}.png`;
+        const label = part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID';
+        orientationBlock = `
+          <div style="margin-top:8px;max-width:220px;">
+            <img src="/images/angle-orientation/${imgFile}" style="width:100%;border:1px solid #ddd;border-radius:4px;" />
+            <div style="font-size:0.75em;color:#666;text-align:center;">${label} Option ${part._orientationOption}</div>
+          </div>
+        `;
+      }
+
       if (part.partType === 'cone_roll') {
         var cTypeLabel = part._coneType === 'eccentric' ? 'Eccentric' + (part._coneEccentricAngle ? ' = ' + part._coneEccentricAngle + '°' : '') : 'Concentric';
         var rSegs = parseInt(part._coneRadialSegments) || 1;
@@ -963,58 +1079,53 @@ function WorkOrderDetailsPage() {
         </div>
       ` : '';
 
-      // Pricing row (only if includePricing)
-      let pricingHtml = '';
-      if (includePricing && (part.partTotal || part.laborTotal || part.materialTotal)) {
-        const matCost = parseFloat(part.materialTotal) || 0;
-        const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
-        const matEach = matCost * (1 + matMarkup / 100);
-        const labEach = parseFloat(part.laborTotal) || 0;
-        const unitPrice = matEach + labEach;
-        const qty = parseInt(part.quantity) || 1;
-        pricingHtml = `
-          <div style="margin-top:8px;padding:8px 12px;background:#e3f2fd;border-radius:4px;display:flex;gap:20px;flex-wrap:wrap;font-size:0.85rem">
-            ${matCost ? `<span>Material: ${formatCurrency(matCost)}${matMarkup > 0 ? ` + ${matMarkup}% = <strong>${formatCurrency(matEach)}</strong>` : ''}</span>` : ''}
-            ${labEach ? `<span>Labor: ${formatCurrency(labEach)}</span>` : ''}
-            <span style="font-weight:bold;color:#1565c0">Unit: ${formatCurrency(unitPrice)} × ${qty} = ${formatCurrency(unitPrice * qty)}</span>
-          </div>
-        `;
-      }
+      // Pricing calculations (always calculate, only display if includePricing)
+      const matCost = parseFloat(part.materialTotal) || 0;
+      const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
+      const matEach = matCost * (1 + matMarkup / 100);
+      const labEach = parseFloat(part.laborTotal) || 0;
+      const unitPrice = matEach + labEach;
+      const qty = parseInt(part.quantity) || 1;
+      const partTotal = unitPrice * qty;
+      let pricingHtml = (part.partTotal || part.laborTotal || part.materialTotal) ? 'yes' : '';
 
       // Special instructions - skip if it duplicates rolling description
       const specialInstr = part.specialInstructions || '';
       const hasUniqueInstructions = specialInstr && specialInstr.trim() !== rollingDescFull.trim();
 
       return `
-        <div style="border:2px solid ${isLinkedService ? '#ce93d8' : '#1976d2'};padding:${isLinkedService ? '10' : '14'}px;margin-bottom:${isLinkedService ? '4' : '14'}px;margin-left:${isLinkedService ? '32' : '0'}px;border-radius:${isLinkedService ? '4' : '8'}px;page-break-inside:avoid;position:relative;background:${isLinkedService ? '#fce4ec' : 'white'}">
-          ${checkboxHtml}
-          <div style="font-size:${isLinkedService ? '1rem' : '1.2rem'};font-weight:bold;color:${isLinkedService ? '#7b1fa2' : '#1976d2'};margin-bottom:4px;padding-bottom:6px;border-bottom:2px solid ${isLinkedService ? '#ce93d8' : '#1976d2'}">
-            ${isLinkedService ? '↳ ' : ''}Part #${part.partNumber} — ${PART_TYPES[part.partType]?.label || part.partType}${isLinkedService && linkedParent ? ` <span style="font-weight:400;font-size:0.85em;color:#9c27b0;">for Part #${linkedParent.partNumber}</span>` : ''}
+        <div class="part-row${isLinkedService ? ' service' : ''}">
+          <div class="pr-item${isLinkedService ? ' svc' : ''}">${isLinkedService ? '+' : '#' + part.partNumber}</div>
+          <div class="pr-desc">
+            <div class="pr-type${isLinkedService ? ' svc' : ''}">${isLinkedService ? '↳ ' : ''}${PART_TYPES[part.partType]?.label || part.partType}${isLinkedService && linkedParent ? ` <span style="font-weight:400;color:#9c27b0;font-size:9px">(for Part #${linkedParent.partNumber})</span>` : ''}</div>
+            <div class="pr-detail">
+              ${part.clientPartNumber ? `Client Part#: ${part.clientPartNumber}<br/>` : ''}
+              ${materialLine}
+              ${part.heatBreakdown && part.heatBreakdown.length > 0 
+                ? `<br/>Heat#: ${part.heatBreakdown.map(h => `<span style="background:#fff3e0;border:1px solid #ffe0b2;border-radius:2px;padding:0 4px;font-weight:600;color:#795548">${h.heat}: ${h.qty}pc</span>`).join(' ')}` 
+                : part.heatNumber ? `<br/>Heat#: ${part.heatNumber}` : ''}
+              ${part.cutFileReference ? `<br/><span style="color:#1565c0">Cut File: ${part.cutFileReference}</span>` : ''}
+            </div>
+            ${rollingLines.length > 0 ? `<div class="roll-block">${rollingLines.join('<br/>')}</div>` : ''}
+            ${orientationBlock}
+            ${coneSegmentBlock}
+            ${hasUniqueInstructions ? `<div style="margin-top:3px;font-size:10px;font-weight:600;color:#333">Note: ${specialInstr}</div>` : ''}
+            ${includePricing && part.partType !== 'fab_service' ? `<div style="margin-top:2px;font-size:9px;color:#888">Material supplied by: ${part.materialSource === 'customer_supplied' ? (order.clientName || 'Customer') : 'Carolina Rolling Company'}</div>` : ''}
+            ${pdfFiles.length > 0 ? `<div style="margin-top:2px;font-size:9px;color:#2e7d32">📎 ${pdfFiles.map(f => f.originalName).join(', ')}</div>` : ''}
+            ${part.partType === 'press_brake' && part._pressBrakeFileName ? `<div style="margin-top:2px;font-size:9px;color:#1565c0">🗂️ Brake File: ${part._pressBrakeFileName}</div>` : ''}
+            ${includePricing && pricingHtml ? `<div class="pr-pricing">${(() => {
+              const matCost2 = parseFloat(part.materialTotal) || 0;
+              const matMarkup2 = parseFloat(part.materialMarkupPercent) || 0;
+              const matEach2 = matCost2 * (1 + matMarkup2 / 100);
+              const labEach2 = parseFloat(part.laborTotal) || 0;
+              return `${matCost2 ? `<span>Material: ${formatCurrency(matCost2)}${matMarkup2 > 0 ? ' +' + matMarkup2 + '%' : ''}</span>` : ''}${labEach2 ? `<span>Labor: ${formatCurrency(labEach2)}</span>` : ''}`;
+            })()}</div>` : ''}
           </div>
-          <div style="font-size:1rem;font-weight:700;margin:6px 0;color:#333">${materialLine}</div>
-          ${part.clientPartNumber ? `<div style="margin-bottom:4px;font-size:0.9rem"><strong>Client Part#:</strong> ${part.clientPartNumber}</div>` : ''}
-          ${part.heatNumber ? `<div style="margin-bottom:4px;font-size:0.9rem"><strong>Heat#:</strong> ${part.heatNumber}</div>` : ''}
-          ${part.cutFileReference ? `<div style="margin-bottom:4px;font-size:0.9rem;color:#1565c0"><strong>📐 Cut File:</strong> ${part.cutFileReference}</div>` : ''}
-          ${rollingBlock}
-          ${coneSegmentBlock}
-          ${specsHtml}
-          ${includePricing && part.partType !== 'fab_service' ? `<div style="margin-bottom:6px;font-size:0.85rem;color:#555">📦 Material supplied by: <strong>${part.materialSource === 'customer_supplied' ? (order.clientName || 'Customer') : 'Carolina Rolling Company'}</strong></div>` : ''}
-          ${part.materialSource === 'customer_supplied' ? '<div style="font-size:0.85rem;color:#666;margin:4px 0"><em>Customer Supplied Material</em></div>' : ''}
-          ${hasUniqueInstructions ? `
-            <div style="margin-top:6px;white-space:pre-wrap;font-size:0.95rem;font-weight:600;color:#333">${specialInstr}</div>
+          <div class="pr-qty">${parseInt(part.quantity) || 1}</div>
+          ${includePricing ? `
+            <div class="pr-unit">${formatCurrency(unitPrice)}</div>
+            <div class="pr-amt">${formatCurrency(partTotal)}</div>
           ` : ''}
-          ${part.partType === 'press_brake' && part._pressBrakeFileName ? `
-            <div style="margin-top:6px;padding:6px 10px;background:#e3f2fd;border:1px solid #90caf9;border-radius:4px;font-size:0.9rem">
-              🗂️ <strong>Brake File:</strong> ${part._pressBrakeFileName}
-            </div>
-          ` : ''}
-          ${pdfFiles.length > 0 ? `
-            <div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:4px;font-size:0.85rem">
-              📎 <strong>Attached Prints:</strong> ${pdfFiles.map(f => f.originalName).join(', ')}
-              <div style="font-size:0.75em;color:#666;margin-top:2px">Prints will open separately for printing</div>
-            </div>
-          ` : ''}
-          ${pricingHtml}
         </div>
       `;
     }).join('') || '<p style="color:#666">No parts added yet</p>';
@@ -1024,96 +1135,77 @@ function WorkOrderDetailsPage() {
 <head>
   <title>${title} - ${order.drNumber ? 'DR-' + order.drNumber : order.orderNumber}</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 20px; max-width: 850px; margin: 0 auto; font-size: 14px; }
-    h1 { color: #1976d2; border-bottom: 3px solid #1976d2; padding-bottom: 10px; margin-bottom: 16px; }
-    .header-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-    .header-item { padding: 8px 10px; background: #f5f5f5; border-radius: 4px; font-size: 0.9rem; }
-    .header-item strong { color: #333; display: block; font-size: 0.75rem; text-transform: uppercase; color: #888; margin-bottom: 2px; }
-    @media print { body { padding: 10px; } .no-print { display: none; } }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; padding: 32px 40px; max-width: 850px; margin: 0 auto; font-size: 13px; color: #333; }
+    @page { size: letter; margin: 0.5in; }
+    @media print { body { padding: 0; } .no-print { display: none; } }
+    .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+    .doc-title { font-size: 20px; font-weight: 700; color: #1976d2; }
+    .doc-right { text-align: right; }
+    .doc-num { font-size: 13px; font-weight: 700; color: #333; }
+    .doc-date { font-size: 11px; color: #888; }
+    .divider { border: none; border-top: 1px solid #ccc; margin: 8px 0; }
+    .info-grid { display: flex; gap: 24px; padding: 8px 0; margin-bottom: 6px; font-size: 12px; flex-wrap: wrap; }
+    .info-item label { display: block; font-size: 9px; text-transform: uppercase; color: #999; letter-spacing: 0.5px; font-weight: 600; }
+    .info-item span { font-weight: 600; color: #333; }
+    .section-title { font-size: 11px; text-transform: uppercase; color: #1976d2; font-weight: 700; letter-spacing: 0.5px; margin: 14px 0 6px; }
+    .parts-header { display: flex; background: #f5f5f5; padding: 6px 0; border-bottom: 2px solid #ccc; font-size: 9px; text-transform: uppercase; color: #888; font-weight: 700; letter-spacing: 0.5px; }
+    .ph-item { width: 42px; padding-left: 4px; }
+    .ph-desc { flex: 1; padding-left: 8px; }
+    .ph-qty { width: 40px; text-align: center; }
+    .ph-unit { width: 65px; text-align: right; }
+    .ph-amt { width: 70px; text-align: right; padding-right: 4px; }
+    .part-row { display: flex; padding: 8px 0; border-bottom: 1px solid #eee; page-break-inside: avoid; }
+    .part-row.service { background: #f9f5fb; padding-left: 20px; }
+    .pr-item { width: 42px; font-weight: 700; color: #1976d2; font-size: 11px; padding-left: 4px; flex-shrink: 0; }
+    .pr-item.svc { color: #7b1fa2; }
+    .pr-desc { flex: 1; padding-left: 8px; }
+    .pr-type { font-weight: 700; font-size: 11px; color: #333; }
+    .pr-type.svc { color: #7b1fa2; font-size: 10px; }
+    .pr-detail { font-size: 10px; color: #666; line-height: 1.5; margin-top: 2px; }
+    .pr-pricing { font-size: 10px; color: #555; margin-top: 3px; display: flex; gap: 12px; }
+    .pr-pricing strong { color: #1565c0; }
+    .pr-qty { width: 40px; text-align: center; font-weight: 600; font-size: 12px; flex-shrink: 0; }
+    .pr-unit { width: 65px; text-align: right; font-size: 11px; flex-shrink: 0; }
+    .pr-amt { width: 70px; text-align: right; font-weight: 700; font-size: 11px; padding-right: 4px; flex-shrink: 0; }
+    .totals-box { margin-top: 16px; padding: 12px 16px; border: 1px solid #ccc; border-radius: 6px; }
+    .total-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+    .total-row.grand { padding: 8px 0; border-top: 2px solid #1976d2; margin-top: 4px; font-size: 16px; font-weight: 700; color: #1976d2; }
+    .cc-box { margin-top: 10px; font-size: 11px; color: #666; text-align: right; }
+    .notes-box { margin-top: 10px; padding: 8px; background: #f9f9f9; border-radius: 4px; font-size: 11px; border-left: 3px solid #1976d2; }
+    .roll-block { background: #e8f5e9; padding: 6px 10px; border-radius: 4px; margin-top: 3px; font-size: 10px; color: #1b5e20; font-weight: 600; }
   </style>
 </head>
 <body>
-  <h1>${includePricing ? '📋' : '🔧'} ${title}: ${order.drNumber ? 'DR-' + order.drNumber : order.orderNumber}</h1>
-  
-  ${includePricing ? `
-  <div class="header-grid">
-    <div class="header-item"><strong>Client</strong>${order.clientName}</div>
-    ${clientPO ? `<div class="header-item"><strong>Client PO#</strong>${clientPO}</div>` : '<div></div>'}
-    ${order.promisedDate ? `<div class="header-item"><strong>Promised Date</strong>${new Date(order.promisedDate).toLocaleDateString()}</div>` : '<div></div>'}
-    ${order.contactName ? `<div class="header-item"><strong>Contact</strong>${order.contactName}${order.contactPhone ? ' — ' + order.contactPhone : ''}</div>` : '<div></div>'}
-    ${order.storageLocation ? `<div class="header-item"><strong>Storage</strong>${order.storageLocation}</div>` : '<div></div>'}
-    ${clientPaymentTerms ? `<div class="header-item"><strong>Payment Terms</strong><span style="font-weight:700;color:#1565c0">${clientPaymentTerms}</span></div>` : ''}
-    <div class="header-item"><strong>Status</strong>${order.status?.replace(/_/g, ' ').toUpperCase()}</div>
-  </div>
-  ` : `
-  <div style="display:flex;gap:24px;margin-bottom:20px;padding:10px 14px;background:#f5f5f5;border-radius:6px;font-size:1rem;">
-    <div><strong style="color:#888;font-size:0.75rem;text-transform:uppercase;display:block">Client</strong>${order.clientName}</div>
-    ${order.storageLocation ? `<div><strong style="color:#888;font-size:0.75rem;text-transform:uppercase;display:block">Storage</strong>${order.storageLocation}</div>` : ''}
-    ${order.promisedDate ? `<div><strong style="color:#888;font-size:0.75rem;text-transform:uppercase;display:block">Promised</strong>${new Date(order.promisedDate).toLocaleDateString()}</div>` : ''}
-    <div><strong style="color:#888;font-size:0.75rem;text-transform:uppercase;display:block">Status</strong>${order.status?.replace(/_/g, ' ').toUpperCase()}</div>
-  </div>
-  `}
-
-  ${order.notes ? `
-    <div style="padding:10px;background:#e3f2fd;border-radius:4px;margin-bottom:16px;border-left:4px solid #1976d2">
-      <strong>Notes:</strong> ${order.notes}
+  <div class="doc-header">
+    <span class="doc-title">${includePricing ? 'WORK ORDER' : 'PRODUCTION ORDER'}</span>
+    <div class="doc-right">
+      <div class="doc-num">${order.drNumber ? 'DR-' + order.drNumber : order.orderNumber}</div>
+      <div class="doc-date">${order.estimateNumber ? 'Est: ' + order.estimateNumber : ''}</div>
     </div>
-  ` : ''}
+  </div>
+  <hr class="divider" />
 
-  <h2 style="color:#1976d2;border-bottom:2px solid #1976d2;padding-bottom:6px;margin-top:24px">
-    Parts (${order.parts?.length || 0})
-  </h2>
+  <div class="info-grid">
+    <div class="info-item"><label>Client</label><span>${order.clientName}</span></div>
+    ${clientPO ? `<div class="info-item"><label>Client PO#</label><span>${clientPO}</span></div>` : ''}
+    ${order.storageLocation ? `<div class="info-item"><label>Storage</label><span>${order.storageLocation}</span></div>` : ''}
+    ${includePricing && order.promisedDate ? `<div class="info-item"><label>Promised</label><span>${new Date(order.promisedDate + 'T12:00:00').toLocaleDateString()}</span></div>` : ''}
+    ${includePricing && order.contactName ? `<div class="info-item"><label>Contact</label><span>${order.contactName}${order.contactPhone ? ' — ' + order.contactPhone : ''}</span></div>` : ''}
+    ${includePricing && clientPaymentTerms ? `<div class="info-item"><label>Payment Terms</label><span style="color:#1565c0">${clientPaymentTerms}</span></div>` : ''}
+  </div>
+
+  ${order.notes ? `<div class="notes-box"><strong>Notes:</strong> ${order.notes}</div>` : ''}
+
+  <div class="section-title">SERVICES & MATERIALS</div>
+  <div class="parts-header">
+    <div class="ph-item">ITEM</div>
+    <div class="ph-desc">DESCRIPTION</div>
+    <div class="ph-qty">QTY</div>
+    ${includePricing ? '<div class="ph-unit">UNIT</div><div class="ph-amt">AMOUNT</div>' : ''}
+  </div>
   
   ${partsHtml}
-
-  ${includePricing ? `
-    <h3 style="color:#1976d2;margin-top:24px;border-bottom:1px solid #bbdefb;padding-bottom:6px">Pricing Summary</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-bottom:12px">
-      <thead>
-        <tr style="background:#f5f5f5">
-          <th style="padding:6px 8px;text-align:left;border-bottom:2px solid #ddd">#</th>
-          <th style="padding:6px 8px;text-align:left;border-bottom:2px solid #ddd">Description</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Qty</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Labor</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Material</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Setup</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Other</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:2px solid #ddd">Total</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${(() => {
-          const sorted = (order.parts || []).sort((a, b) => a.partNumber - b.partNumber).filter(p => p.partType !== 'rush_service');
-          const regular = sorted.filter(p => !['fab_service', 'shop_rate'].includes(p.partType) || !((p.formData || {})._linkedPartId || p._linkedPartId));
-          const services = sorted.filter(p => ['fab_service', 'shop_rate'].includes(p.partType) && ((p.formData || {})._linkedPartId || p._linkedPartId));
-          const grouped = [];
-          const used = new Set();
-          regular.forEach(rp => {
-            grouped.push(rp);
-            services.forEach(sp => {
-              const lid = (sp.formData || {})._linkedPartId || sp._linkedPartId;
-              if (String(lid) === String(rp.id) && !used.has(sp.id)) { grouped.push(sp); used.add(sp.id); }
-            });
-          });
-          services.forEach(sp => { if (!used.has(sp.id)) grouped.push(sp); });
-          return grouped.map(part => {
-            const isLS = ['fab_service', 'shop_rate'].includes(part.partType) && ((part.formData || {})._linkedPartId || part._linkedPartId);
-            return `
-          <tr style="border-bottom:1px solid #eee;${isLS ? 'background:#fce4ec;' : ''}">
-            <td style="padding:6px 8px">${isLS ? '' : part.partNumber}</td>
-            <td style="padding:6px 8px;${isLS ? 'padding-left:20px;' : ''}">${isLS ? '↳ ' : ''}${PART_TYPES[part.partType]?.label || part.partType}${part.materialDescription ? `<div style="font-size:0.8em;color:#666">${part.materialDescription}</div>` : ''}</td>
-            <td style="padding:6px 8px;text-align:right">${part.quantity}</td>
-            <td style="padding:6px 8px;text-align:right">${formatCurrency(part.laborTotal)}</td>
-            <td style="padding:6px 8px;text-align:right">${formatCurrency(part.materialTotal)}</td>
-            <td style="padding:6px 8px;text-align:right">${formatCurrency(part.setupCharge)}</td>
-            <td style="padding:6px 8px;text-align:right">${formatCurrency(part.otherCharges)}</td>
-            <td style="padding:6px 8px;text-align:right;font-weight:600">${formatCurrency(part.partTotal)}</td>
-          </tr>`;
-          }).join('');
-        })()}
-      </tbody>
-    </table>
-  ` : ''}
 
   ${includePricing ? `
     <div style="margin-top:24px;padding:16px;background:#f0f7ff;border-radius:8px;border:1px solid #bbdefb">
@@ -1144,7 +1236,7 @@ function WorkOrderDetailsPage() {
       })()}
       <div style="display:flex;justify-content:space-between;padding:4px 0"><span>Parts Subtotal</span><strong>${formatCurrency(calculateTotals().partsSubtotal)}</strong></div>
       ${calculateTotals().trucking > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0"><span>${order.truckingDescription || 'Trucking'}</span><strong>${formatCurrency(calculateTotals().trucking)}</strong></div>` : ''}
-      ${(editData.taxExempt || order.taxExempt) ? `<div style="display:flex;justify-content:space-between;padding:4px 0"><span>Tax</span><span style="color:#c62828;font-weight:bold">EXEMPT${(editData.taxExemptCertNumber || order.taxExemptCertNumber) ? ' (Cert#: ' + (editData.taxExemptCertNumber || order.taxExemptCertNumber) + ')' : ''}</span></div>` : (calculateTotals().taxAmount > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0"><span>Tax (${calculateTotals().taxRate}%)</span><strong>${formatCurrency(calculateTotals().taxAmount)}</strong></div>` : '')}
+      ${(editData.taxExempt || order.taxExempt) ? `<div style="display:flex;justify-content:space-between;padding:4px 0"><span>Tax</span><span style="color:#c62828;font-weight:bold">EXEMPT</span></div>` : (calculateTotals().taxAmount > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0"><span>Tax (${calculateTotals().taxRate}%)</span><strong>${formatCurrency(calculateTotals().taxAmount)}</strong></div>` : '')}
       <div style="display:flex;justify-content:space-between;padding:8px 0;border-top:2px solid #1976d2;margin-top:4px;font-size:1.2rem">
         <strong>Grand Total</strong><strong style="color:#2e7d32">${formatCurrency(calculateTotals().grandTotal)}</strong>
       </div>
@@ -1222,6 +1314,205 @@ function WorkOrderDetailsPage() {
   // Print Production Copy (no pricing + part prints only)
   const printShopOrder = () => generatePrintPackage('production', false);
 
+  // Print Pickup Checklist - simple form with checkboxes for loading
+  const printPickupChecklist = () => {
+    setShowPrintMenu(false);
+    const drLabel = order.drNumber ? `DR-${order.drNumber}` : (order.orderNumber || '—');
+    const clientPO = order.clientPurchaseOrderNumber || '';
+    const parts = order?.parts || [];
+    const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
+    const regularParts = parts.filter(p => !SERVICE_TYPES.includes(p.partType)).sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+    const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+
+    const getPartDesc = (p) => {
+      const fd = p.formData || {};
+      let desc = fd._materialDescription || p.materialDescription || '';
+      if (!desc) {
+        const specs = [];
+        if (p.thickness) specs.push(p.thickness);
+        if (p.width) specs.push(`x ${p.width}"`);
+        if (p.length) specs.push(`x ${p.length}"`);
+        if (p.sectionSize) specs.push(p.sectionSize);
+        if (p.outerDiameter) specs.push(`${p.outerDiameter}" OD`);
+        if (p.material) specs.push(p.material);
+        desc = specs.join(' ') || p.partType || 'Part';
+      }
+      // Clean leading qty
+      desc = desc.replace(/^\(\d+\)\s*/, '').replace(/^\d+pc:?\s*/, '');
+      return desc;
+    };
+
+    const getPartType = (t) => {
+      const map = { plate_roll: 'Plate Roll', pipe_roll: 'Pipe/Tube', tube_roll: 'Sq/Rect Tube',
+        angle_roll: 'Angle Roll', channel_roll: 'Channel', beam_roll: 'Beam', flat_bar: 'Flat Bar',
+        cone_roll: 'Cone', tee_bar: 'Tee Bar', press_brake: 'Press Brake', flat_stock: 'Flat Stock' };
+      return map[t] || t || 'Part';
+    };
+
+    const getRolling = (p) => {
+      const fd = p.formData || {};
+      let desc = fd._rollingDescription || '';
+      // Correct stale EW/HW direction using actual rollType
+      if (desc && p.rollType) {
+        const dir = (() => {
+          if (!p.rollType) return '';
+          if (p.partType === 'tee_bar') return p.rollType === 'easy_way' ? 'SO' : p.rollType === 'on_edge' ? 'SU' : 'SI';
+          return p.rollType === 'easy_way' ? 'EW' : p.rollType === 'on_edge' ? 'OE' : 'HW';
+        })();
+        if (dir) {
+          const allDirs = ['EW', 'HW', 'OE', 'SO', 'SI', 'SU'];
+          const dirRx = new RegExp('\\b(' + allDirs.join('|') + ')\\b', 'g');
+          const found = desc.match(dirRx);
+          if (found && found.length > 0 && !found.includes(dir)) {
+            desc = desc.replace(dirRx, dir);
+          }
+        }
+      }
+      return desc.split(/\n|\\n/).filter(l => l.trim()).slice(0, 1).join('') || '';
+    };
+
+    const printWindow = window.open('', '_blank');
+    // Use pickup summary to show remaining quantities
+    const pickupSummary = getPickupSummary();
+    const hasPartialHistory = (order?.pickupHistory || []).length > 0;
+    const remainingParts = hasPartialHistory 
+      ? regularParts.map(p => {
+          const summary = pickupSummary.find(s => s.id === p.id);
+          return { ...p, displayQty: summary ? summary.remaining : (p.quantity || 1), totalQty: p.quantity || 1, alreadyShipped: summary ? summary.picked : 0 };
+        }).filter(p => p.displayQty > 0)
+      : regularParts.map(p => ({ ...p, displayQty: p.quantity || 1, totalQty: p.quantity || 1, alreadyShipped: 0 }));
+    const totalPieces = remainingParts.reduce((s, p) => s + p.displayQty, 0);
+
+    printWindow.document.write(`<!DOCTYPE html><html><head><title>Pickup Checklist - ${drLabel}</title>
+    <style>
+      @font-face { font-family: 'Yellowcake'; src: url('/fonts/Yellowcake-Regular.ttf') format('truetype'); }
+      @page { size: letter; margin: 0.5in; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: Arial, Helvetica, sans-serif; font-size: 12px; color: #000; padding: 0.5in; }
+      .header { display: flex; align-items: center; gap: 14px; padding-bottom: 10px; margin-bottom: 0; }
+      .logo { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; }
+      .company-name { font-family: 'Yellowcake', cursive; font-size: 22px; color: #333; line-height: 1.2; }
+      .company-contact { font-size: 8.5px; color: #666; margin-top: 2px; }
+      .divider { border: none; border-top: 1px solid #ccc; margin: 8px 0; }
+      .doc-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6px; }
+      .doc-title { font-size: 18px; font-weight: 700; color: #1976d2; }
+      .doc-info { text-align: right; }
+      .dr { font-size: 24px; font-weight: 700; font-family: 'Courier New', monospace; color: #333; }
+      .info-row { font-size: 10px; color: #555; margin-top: 1px; }
+      .client-bar { display: flex; gap: 24px; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; margin-bottom: 12px; font-size: 11px; }
+      .client-bar strong { display: block; font-size: 8px; text-transform: uppercase; color: #888; letter-spacing: 0.5px; margin-bottom: 1px; }
+      .title { text-align: center; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin: 8px 0 12px; color: #1976d2; }
+      table { width: 100%; border-collapse: collapse; }
+      th { background: #1976d2; color: white; padding: 6px 10px; text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+      th.check { width: 50px; text-align: center; }
+      th.qty { width: 50px; text-align: center; }
+      th.pn { width: 45px; text-align: center; }
+      td { padding: 8px 10px; border-bottom: 1px solid #ddd; vertical-align: top; }
+      td.check { text-align: center; vertical-align: middle; }
+      td.qty { text-align: center; font-weight: 700; font-size: 14px; }
+      td.pn { text-align: center; font-weight: 700; color: #1565c0; }
+      .checkbox { width: 22px; height: 22px; border: 2px solid #333; display: inline-block; border-radius: 3px; }
+      .type-tag { font-size: 9px; color: #666; background: #eee; padding: 1px 6px; border-radius: 3px; display: inline-block; margin-bottom: 2px; }
+      .desc { font-weight: 600; font-size: 12px; }
+      .rolling { font-size: 11px; color: #333; margin-top: 2px; }
+      .special { font-size: 10px; color: #c62828; font-weight: 600; margin-top: 2px; }
+      .count-summary { text-align: center; font-size: 12px; margin: 6px 0 10px; color: #666; }
+      .footer { margin-top: 24px; border-top: 1px solid #ccc; padding-top: 14px; }
+      .sig-row { display: flex; justify-content: space-between; margin-top: 20px; gap: 30px; }
+      .sig-block { flex: 1; }
+      .sig-line { border-bottom: 1px solid #333; height: 28px; margin-bottom: 3px; }
+      .sig-label { font-size: 9px; color: #888; }
+      .notes-box { margin-top: 12px; border: 1px solid #ddd; border-radius: 4px; min-height: 50px; padding: 8px; }
+      .notes-label { font-size: 9px; color: #888; margin-bottom: 3px; }
+      .footer-branding { margin-top: 16px; display: flex; justify-content: space-between; font-size: 8px; color: #aaa; padding-top: 8px; border-top: 1px solid #eee; }
+      @media print { body { padding: 0; } }
+    </style></head><body>
+
+    <div class="header">
+      <img src="/logo.png" class="logo" onerror="this.style.display='none'" />
+      <div>
+        <div class="company-name">Carolina Rolling Co. Inc.</div>
+        <div class="company-contact">9152 Sonrisa St., Bellflower, CA 90706 &nbsp;|&nbsp; (562) 633-1044 &nbsp;|&nbsp; keepitrolling@carolinarolling.com</div>
+      </div>
+    </div>
+    <hr class="divider" />
+    
+    <div class="doc-header">
+      <div class="doc-title">LOADING CHECKLIST${hasPartialHistory ? ' (Remaining)' : ''}</div>
+      <div class="doc-info">
+        <div class="dr">${drLabel}</div>
+        <div class="info-row">${today}</div>
+      </div>
+    </div>
+
+    <div class="client-bar">
+      <div><strong>Client</strong>${order.clientName || '—'}</div>
+      ${clientPO ? `<div><strong>PO#</strong>${clientPO}</div>` : ''}
+      ${order.storageLocation ? `<div><strong>Storage</strong>${order.storageLocation}</div>` : ''}
+    </div>
+
+    <div class="count-summary">${remainingParts.length} part${remainingParts.length !== 1 ? 's' : ''} — ${totalPieces} total pieces${hasPartialHistory ? ' remaining' : ''}</div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="check">✓</th>
+          <th class="pn">#</th>
+          <th class="qty">QTY</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${remainingParts.map(p => {
+          const desc = getPartDesc(p);
+          const rolling = getRolling(p);
+          const special = p.specialInstructions || '';
+          const shippedNote = p.alreadyShipped > 0 ? `<div style="font-size:9px;color:#888;margin-top:1px;">(${p.alreadyShipped} of ${p.totalQty} previously shipped)</div>` : '';
+          return `<tr>
+            <td class="check"><div class="checkbox"></div></td>
+            <td class="pn">${p.partNumber || ''}</td>
+            <td class="qty">${p.displayQty}${shippedNote}</td>
+            <td>
+              <span class="type-tag">${getPartType(p.partType)}</span>
+              <div class="desc">${desc}</div>
+              ${rolling ? `<div class="rolling">${rolling}</div>` : ''}
+              ${special ? `<div class="special">⚠ ${special}</div>` : ''}
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <div class="footer">
+      <div class="notes-label">Notes / Discrepancies:</div>
+      <div class="notes-box"></div>
+      
+      <div class="sig-row">
+        <div class="sig-block">
+          <div class="sig-line"></div>
+          <div class="sig-label">Loaded By (Print Name)</div>
+        </div>
+        <div class="sig-block">
+          <div class="sig-line"></div>
+          <div class="sig-label">Picked Up By (Signature)</div>
+        </div>
+        <div class="sig-block">
+          <div class="sig-line"></div>
+          <div class="sig-label">Date / Time</div>
+        </div>
+      </div>
+
+      <div class="footer-branding">
+        <span>Carolina Rolling Co. Inc. — 9152 Sonrisa St., Bellflower, CA 90706</span>
+        <span>${drLabel} — Printed ${today}</span>
+      </div>
+    </div>
+
+    </body></html>`);
+    printWindow.document.close();
+    printWindow.onload = () => printWindow.print();
+  };
+
   const printPartLabel = (part) => {
     const printWindow = window.open('', '_blank');
     const clientPO = order.clientPurchaseOrderNumber || shipment?.clientPurchaseOrderNumber;
@@ -1231,13 +1522,21 @@ function WorkOrderDetailsPage() {
       <body><div class="lg">${part.clientPartNumber || `Part ${part.partNumber}`}</div>
       <div class="sm">${order.drNumber ? `DR-${order.drNumber}` : order.orderNumber}</div>
       ${clientPO ? `<div class="sm">PO: ${clientPO}</div>` : ''}
-      ${part.heatNumber ? `<div class="sm">Heat: ${part.heatNumber}</div>` : ''}
+      ${part.heatBreakdown && part.heatBreakdown.length > 0 
+        ? `<div class="sm">Heat: ${part.heatBreakdown.map(h => `<span style="background:#fff3e0;border:1px solid #ffe0b2;border-radius:3px;padding:0 4px;font-weight:600;color:#795548">${h.heat}: ${h.qty}pc</span>`).join(' ')}</div>` 
+        : part.heatNumber ? `<div class="sm">Heat: ${part.heatNumber}</div>` : ''}
       <div class="sm">Qty: ${part.quantity}</div></body></html>`);
     printWindow.document.close();
     printWindow.print();
   };
 
-  const formatDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
+  const formatDate = (d) => {
+    if (!d) return 'N/A';
+    // Date-only strings like "2026-02-27" are parsed as UTC midnight, which shifts back a day in US timezones
+    // Append T12:00:00 to force midday so timezone offset never flips the date
+    const dateStr = typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d + 'T12:00:00' : d;
+    return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  };
   const formatDateTime = (d) => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'N/A';
   // === Link Estimate Handlers ===
   const handleSearchEstimates = async (query) => {
@@ -1435,7 +1734,6 @@ function WorkOrderDetailsPage() {
       draft: { background: '#e3f2fd', color: '#1565c0' },
       in_progress: { background: '#e1f5fe', color: '#0288d1' },
       completed: { background: '#e8f5e9', color: '#2e7d32' },
-      picked_up: { background: '#f3e5f5', color: '#7b1fa2' },
     };
     const labels = {
       quoted: 'Quoted',
@@ -1450,7 +1748,6 @@ function WorkOrderDetailsPage() {
       draft: 'Received',
       in_progress: 'Processing',
       completed: 'Stored',
-      picked_up: 'Shipped'
     };
     return <span className="status-badge" style={styles[status] || styles.received}>{labels[status] || status?.replace('_', ' ')}</span>;
   };
@@ -1506,9 +1803,31 @@ function WorkOrderDetailsPage() {
                 <option value="processing">Processing</option>
                 <option value="stored">Stored</option>
                 <option value="shipped">Shipped</option>
-                <option value="picked_up">Picked Up</option>
               </select>
-              {order.status === 'stored' && <button className="btn btn-success" onClick={() => setShowPickupModal(true)}><Check size={18} />Pickup/Ship</button>}
+              <select className="form-select" 
+                value={order.priority || 'normal'} 
+                onChange={async (e) => {
+                  try {
+                    await updateWorkOrder(order.id, { priority: e.target.value });
+                    setOrder({ ...order, priority: e.target.value });
+                    showMessage(`Priority set to ${e.target.value}`);
+                  } catch (err) { setError('Failed to update priority'); }
+                }}
+                style={{ 
+                  width: 'auto',
+                  fontWeight: order.priority === 'urgent' ? 700 : order.priority === 'high' ? 600 : 400,
+                  color: order.priority === 'urgent' ? '#c62828' : order.priority === 'high' ? '#e65100' : '#333',
+                  borderColor: order.priority === 'urgent' ? '#c62828' : order.priority === 'high' ? '#e65100' : '#ddd'
+                }}>
+                <option value="normal">Normal Priority</option>
+                <option value="high">⚡ High Priority</option>
+                <option value="urgent">🔴 Urgent</option>
+              </select>
+              {(order.status === 'stored' || (order.pickupHistory?.length > 0 && getPickupSummary().some(p => p.remaining > 0))) && (
+                <button className="btn btn-success" onClick={() => setShowPickupModal(true)}>
+                  <Check size={18} />{order.pickupHistory?.length > 0 ? 'Continue Shipment' : 'Ship'}
+                </button>
+              )}
             </>
           )}
           <div style={{ position: 'relative' }}>
@@ -1531,6 +1850,33 @@ function WorkOrderDetailsPage() {
                   ⬇️ Production Package PDF<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Same as above, saves to downloads</span>
                 </button>
                 <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
+                <div style={{ padding: '8px 16px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Pickup / Loading</div>
+                <button onClick={printPickupChecklist} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
+                  ☑️ Pickup Checklist<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Checkboxes for each part — for loading crew</span>
+                </button>
+                <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
+                <div style={{ padding: '8px 16px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>QuickBooks</div>
+                <button onClick={async () => {
+                  try {
+                    setShowPrintMenu(false);
+                    const response = await exportWorkOrderIIF(order.id);
+                    const blob = new Blob([response.data], { type: 'text/plain' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `invoice-${order.drNumber ? 'DR-' + order.drNumber : order.orderNumber}-${(order.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.iif`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    a.remove();
+                    showMessage('QuickBooks IIF file downloaded');
+                  } catch (err) {
+                    setError(err.response?.data?.error?.message || 'Failed to export IIF');
+                  }
+                }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
+                  📗 Export Invoice (.iif)<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Import into QuickBooks Desktop via File → Utilities → Import</span>
+                </button>
+                <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
                 <button onClick={() => { setShowPrintMenu(false); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', color: '#666', fontSize: '0.9rem' }}>Cancel</button>
               </div>
             )}
@@ -1548,7 +1894,7 @@ function WorkOrderDetailsPage() {
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      {/* Toggle for Receiving Info */}
+      {/* Toggle for Shipping Details */}
       {shipment ? (
         <div style={{ marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
           <button 
@@ -1557,8 +1903,9 @@ function WorkOrderDetailsPage() {
             style={{ display: 'flex', alignItems: 'center', gap: 8 }}
           >
             <Truck size={18} />
-            {showReceivingInfo ? 'Hide Receiving Info' : 'Show Receiving Info'}
+            {showReceivingInfo ? 'Hide Shipping Details' : 'Shipping Details'}
             {shipment.photos?.length > 0 && <span style={{ background: '#4caf50', color: 'white', borderRadius: 10, padding: '2px 6px', fontSize: '0.7rem' }}>{shipment.photos.length} 📷</span>}
+            {(order?.pickupHistory || []).length > 0 && <span style={{ background: '#1976d2', color: 'white', borderRadius: 10, padding: '2px 6px', fontSize: '0.7rem' }}>{(order?.pickupHistory || []).length} shipment{(order?.pickupHistory || []).length > 1 ? 's' : ''}</span>}
           </button>
           <button
             className="btn btn-outline"
@@ -1583,49 +1930,142 @@ function WorkOrderDetailsPage() {
         </div>
       )}
 
-      {/* Receiving Info Panel */}
+      {/* Shipping Details Panel */}
       {showReceivingInfo && shipment && (
         <div className="card" style={{ marginBottom: 20, borderLeft: '4px solid #4caf50' }}>
           <div className="card-header">
-            <h3 className="card-title"><Truck size={20} style={{ marginRight: 8 }} />Receiving Info</h3>
+            <h3 className="card-title"><Truck size={20} style={{ marginRight: 8 }} />Shipping Details</h3>
           </div>
           
-          <div className="detail-grid">
-            <div className="detail-item">
-              <div className="detail-item-label"><Clock size={14} /> Received</div>
-              <div className="detail-item-value">{formatDateTime(shipment.receivedAt)}</div>
-            </div>
-            {shipment.receivedBy && (
+          {/* Receiving Info */}
+          <div style={{ marginBottom: 16 }}>
+            <h4 style={{ fontSize: '0.85rem', color: '#888', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Receiving</h4>
+            <div className="detail-grid">
               <div className="detail-item">
-                <div className="detail-item-label"><User size={14} /> Received By</div>
-                <div className="detail-item-value">{shipment.receivedBy}</div>
+                <div className="detail-item-label"><Clock size={14} /> Received</div>
+                <div className="detail-item-value">{formatDateTime(shipment.receivedAt)}</div>
               </div>
-            )}
-            <div className="detail-item">
-              <div className="detail-item-label">Quantity</div>
-              <div className="detail-item-value">{shipment.quantity} piece{shipment.quantity !== 1 ? 's' : ''}</div>
-            </div>
-            {shipment.location && (
+              {shipment.receivedBy && (
+                <div className="detail-item">
+                  <div className="detail-item-label"><User size={14} /> Received By</div>
+                  <div className="detail-item-value">{shipment.receivedBy}</div>
+                </div>
+              )}
               <div className="detail-item">
-                <div className="detail-item-label"><MapPin size={14} /> Storage Location</div>
-                <div className="detail-item-value">{shipment.location}</div>
+                <div className="detail-item-label">Quantity</div>
+                <div className="detail-item-value">{shipment.quantity} piece{shipment.quantity !== 1 ? 's' : ''}</div>
               </div>
-            )}
+              {shipment.location && (
+                <div className="detail-item">
+                  <div className="detail-item-label"><MapPin size={14} /> Storage Location</div>
+                  <div className="detail-item-value">{shipment.location}</div>
+                </div>
+              )}
+              {order.pickedUpAt && (
+                <div className="detail-item">
+                  <div className="detail-item-label"><Truck size={14} /> Shipped</div>
+                  <div className="detail-item-value" style={{ color: '#2e7d32', fontWeight: 600 }}>{formatDateTime(order.pickedUpAt)}</div>
+                </div>
+              )}
+              {!order.pickedUpAt && order.pickupHistory?.length > 0 && (
+                <div className="detail-item">
+                  <div className="detail-item-label"><Truck size={14} /> First Shipment</div>
+                  <div className="detail-item-value" style={{ color: '#e65100', fontWeight: 600 }}>{formatDateTime(order.pickupHistory[0].date)}</div>
+                </div>
+              )}
+              {order.pickedUpBy && (
+                <div className="detail-item">
+                  <div className="detail-item-label"><User size={14} /> Picked Up By</div>
+                  <div className="detail-item-value">{order.pickedUpBy}</div>
+                </div>
+              )}
+            </div>
           </div>
 
           {shipment.description && (
-            <div style={{ marginTop: 16, padding: 16, background: '#e3f2fd', borderRadius: 8, borderLeft: '4px solid #1976d2' }}>
+            <div style={{ marginBottom: 16, padding: 16, background: '#e3f2fd', borderRadius: 8, borderLeft: '4px solid #1976d2' }}>
               <div style={{ fontWeight: 600, color: '#1565c0', marginBottom: 8 }}>Material Description</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{shipment.description}</div>
             </div>
           )}
 
           {shipment.notes && (
-            <div style={{ marginTop: 16, padding: 16, background: '#fff3e0', borderRadius: 8, borderLeft: '4px solid #ff9800' }}>
+            <div style={{ marginBottom: 16, padding: 16, background: '#fff3e0', borderRadius: 8, borderLeft: '4px solid #ff9800' }}>
               <div style={{ fontWeight: 600, color: '#e65100', marginBottom: 8 }}>Receiving Notes</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{shipment.notes}</div>
             </div>
           )}
+
+          {/* Shipping History */}
+          {(order?.pickupHistory || []).length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <h4 style={{ fontSize: '0.85rem', color: '#888', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 12 }}>Shipments Out</h4>
+              {(order.pickupHistory || []).map((entry, idx) => (
+                <div key={idx} style={{ 
+                  marginBottom: 12, padding: 14, borderRadius: 8,
+                  background: entry.type === 'full' ? '#e8f5e9' : '#fff8e1',
+                  border: `1px solid ${entry.type === 'full' ? '#a5d6a7' : '#ffe082'}`
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <div>
+                      <strong style={{ color: entry.type === 'full' ? '#2e7d32' : '#e65100' }}>
+                        {entry.type === 'full' ? '📦 Full Shipment' : '📦 Partial Shipment'}
+                      </strong>
+                      <span style={{ color: '#666', marginLeft: 8, fontSize: '0.85rem' }}>
+                        — picked up by <strong>{entry.pickedUpBy}</strong>
+                      </span>
+                    </div>
+                    <span style={{ fontSize: '0.8rem', color: '#888' }}>
+                      {new Date(entry.date).toLocaleDateString()} {new Date(entry.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <table style={{ width: '100%', fontSize: '0.85rem', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid rgba(0,0,0,0.1)' }}>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600, color: '#555' }}>Part</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600, color: '#555' }}>Description</th>
+                        <th style={{ textAlign: 'center', padding: '4px 8px', fontWeight: 600, color: '#555' }}>Qty Shipped</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(entry.items || []).map((item, i) => (
+                        <tr key={i} style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+                          <td style={{ padding: '4px 8px', fontWeight: 600 }}>#{item.partNumber}</td>
+                          <td style={{ padding: '4px 8px', color: '#666' }}>
+                            {item.description || PART_TYPES[item.partType]?.label || item.partType || '—'}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'center', fontWeight: 700 }}>{item.quantity}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Remaining Balance */}
+          {(order?.pickupHistory || []).length > 0 && (() => {
+            const summary = getPickupSummary();
+            const remaining = summary.filter(p => p.remaining > 0);
+            if (remaining.length === 0) return null;
+            return (
+              <div style={{ marginTop: 12, padding: 14, borderRadius: 8, background: '#fff3e0', border: '1px solid #ffcc80' }}>
+                <strong style={{ color: '#e65100', display: 'block', marginBottom: 8 }}>⏳ Remaining to Ship</strong>
+                <table style={{ width: '100%', fontSize: '0.85rem', borderCollapse: 'collapse' }}>
+                  <tbody>
+                    {remaining.map(p => (
+                      <tr key={p.id} style={{ borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+                        <td style={{ padding: '4px 8px', fontWeight: 600 }}>#{p.partNumber}</td>
+                        <td style={{ padding: '4px 8px', color: '#666' }}>{PART_TYPES[p.partType]?.label || p.partType}</td>
+                        <td style={{ padding: '4px 8px', textAlign: 'center', fontWeight: 700, color: '#e65100' }}>{p.remaining} of {p.totalQty}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
 
           {/* Photos */}
           {shipment.photos && shipment.photos.length > 0 && (
@@ -1742,20 +2182,9 @@ function WorkOrderDetailsPage() {
                   ))}
                   {editData._clientSearch && editData._clientSearch.length >= 2 && !clientSuggestions.some(c => c.name.toLowerCase() === (editData._clientSearch || '').toLowerCase()) && (
                     <div style={{ padding: '8px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600, borderTop: '2px solid #c8e6c9' }}
-                      onMouseDown={async () => {
-                        try {
-                          const res = await fetch(`${process.env.REACT_APP_API_URL || ''}/api/clients`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('token')}` },
-                            body: JSON.stringify({ name: editData._clientSearch })
-                          });
-                          const data = await res.json();
-                          if (data.data) {
-                            setEditData({ ...editData, clientId: data.data.id, clientName: data.data.name, _clientSearch: undefined });
-                            showMessage(`Client "${data.data.name}" created`);
-                          }
-                        } catch (err) { setError('Failed to create client'); }
+                      onMouseDown={() => {
                         setShowClientSuggestions(false);
+                        navigate(`/clients-vendors?addClient=${encodeURIComponent(editData._clientSearch)}`);
                       }}>
                       + Add "{editData._clientSearch}" as new client
                     </div>
@@ -1860,11 +2289,41 @@ function WorkOrderDetailsPage() {
           </div>
         )}
 
+        {/* Missing PO PDFs — show regenerate for POs that have parts assigned but no document */}
+        {(() => {
+          const poDocNames = (order.documents || []).filter(d => d.documentType === 'purchase_order').map(d => d.originalName?.match(/^(PO\d+)/)?.[1]).filter(Boolean);
+          const partPOs = [...new Set((order.parts || []).map(p => p.materialPurchaseOrderNumber).filter(Boolean))];
+          const missingPOs = partPOs.filter(po => !poDocNames.includes(po));
+          if (missingPOs.length === 0) return null;
+          return (
+            <div style={{ marginTop: 12, padding: 12, background: '#ffebee', borderRadius: 8, border: '1px solid #ef9a9a' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#c62828', marginBottom: 8 }}>Missing PO Documents</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {missingPOs.map(po => (
+                  <button key={po} onClick={async () => {
+                    try {
+                      await createPODocument(id, po);
+                      showMessage(`${po} PDF regenerated`);
+                      await loadOrder();
+                    } catch (err) {
+                      setError(`Failed to regenerate ${po}: ${err.response?.data?.error?.message || err.message}`);
+                    }
+                  }} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'white', border: '1px solid #ef9a9a', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                    <RefreshCw size={14} color="#c62828" />
+                    <strong style={{ color: '#c62828' }}>{po}</strong>
+                    <span style={{ color: '#666' }}>— Regenerate PDF</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Order Documents Section */}
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #eee' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <File size={18} /> Documents ({order.documents?.filter(d => d.documentType !== 'purchase_order').length || 0})
+              <File size={18} /> Documents ({order.documents?.filter(d => d.documentType !== 'purchase_order' && d.documentType !== 'mtr').length || 0})
             </div>
             <button className="btn btn-sm btn-outline" onClick={() => docInputRef.current?.click()} disabled={uploadingDocs}>
               <Upload size={14} />{uploadingDocs ? 'Uploading...' : 'Upload'}
@@ -1873,9 +2332,9 @@ function WorkOrderDetailsPage() {
               onChange={(e) => handleDocumentUpload(Array.from(e.target.files))} />
           </div>
           <p style={{ fontSize: '0.8rem', color: '#666', marginBottom: 12 }}>Upload customer POs, supplier quotes, drawings, etc.</p>
-          {order.documents?.filter(d => d.documentType !== 'purchase_order').length > 0 && (
+          {order.documents?.filter(d => d.documentType !== 'purchase_order' && d.documentType !== 'mtr').length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {order.documents.filter(d => d.documentType !== 'purchase_order').map(doc => (
+              {order.documents.filter(d => d.documentType !== 'purchase_order' && d.documentType !== 'mtr').map(doc => (
                 <div key={doc.id} style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f5f5f5', padding: '8px 12px', borderRadius: 6, fontSize: '0.85rem' }}>
                   <File size={16} color="#1976d2" />
                   <span style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.originalName}</span>
@@ -1886,7 +2345,123 @@ function WorkOrderDetailsPage() {
             </div>
           )}
         </div>
+
+        {/* MTR (Material Test Reports) Section */}
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #eee' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8, color: '#6a1b9a' }}>
+              <FileText size={18} /> MTRs ({order.documents?.filter(d => d.documentType === 'mtr').length || 0})
+            </div>
+            <button className="btn btn-sm" onClick={() => mtrInputRef.current?.click()} disabled={uploadingMtrs}
+              style={{ background: '#6a1b9a', color: 'white', border: 'none' }}>
+              <Upload size={14} />{uploadingMtrs ? 'Uploading...' : 'Upload MTR'}
+            </button>
+            <input type="file" multiple accept=".pdf" ref={mtrInputRef} style={{ display: 'none' }} 
+              onChange={(e) => { handleMtrUpload(Array.from(e.target.files)); e.target.value = ''; }} />
+          </div>
+          <p style={{ fontSize: '0.8rem', color: '#666', marginBottom: 12 }}>Upload Material Test Reports (PDF)</p>
+          {order.documents?.filter(d => d.documentType === 'mtr').length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {order.documents.filter(d => d.documentType === 'mtr').map(doc => (
+                <div key={doc.id} style={{ 
+                  display: 'flex', alignItems: 'center', gap: 8, 
+                  background: '#f3e5f5', padding: '10px 14px', borderRadius: 8, 
+                  border: '1px solid #ce93d8', fontSize: '0.85rem' 
+                }}>
+                  <FileText size={18} color="#6a1b9a" />
+                  <span style={{ flex: 1, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.originalName}</span>
+                  <span style={{ fontSize: '0.7rem', color: '#999' }}>
+                    {doc.createdAt ? new Date(doc.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
+                  </span>
+                  <button onClick={() => handleViewDocument(doc.id)} 
+                    style={{ background: '#6a1b9a', color: 'white', border: 'none', cursor: 'pointer', padding: '4px 10px', borderRadius: 4, fontSize: '0.75rem', fontWeight: 600 }}>
+                    <Eye size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />View
+                  </button>
+                  <button onClick={() => handleDeleteDocument(doc.id)} 
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: '#d32f2f' }}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ background: '#fafafa', padding: 16, borderRadius: 8, textAlign: 'center', color: '#999', fontSize: '0.85rem' }}>
+              No MTRs uploaded yet
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Shipping History Section */}
+      {order.pickupHistory?.length > 0 && (
+        <div className="card" style={{ marginTop: 20 }}>
+          <div className="card-header">
+            <h3 className="card-title"><Truck size={20} style={{ marginRight: 8 }} />Shipping History ({order.pickupHistory.length})</h3>
+          </div>
+          <div style={{ padding: 16 }}>
+            {(() => {
+              const summary = getPickupSummary();
+              const hasRemaining = summary.some(p => p.remaining > 0);
+              return (
+                <>
+                  {/* Remaining Inventory */}
+                  {hasRemaining && (
+                    <div style={{ background: '#fff3e0', padding: 12, borderRadius: 8, marginBottom: 16, border: '1px solid #ffcc80' }}>
+                      <strong style={{ color: '#e65100', fontSize: '0.9rem' }}>⚠ Items Still in Inventory</strong>
+                      <div style={{ marginTop: 8 }}>
+                        {summary.filter(p => p.remaining > 0).map(p => (
+                          <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #ffe0b2', fontSize: '0.85rem' }}>
+                            <span><strong>#{p.partNumber}</strong> {PART_TYPES[p.partType]?.label || p.partType}</span>
+                            <span><strong style={{ color: '#e65100' }}>{p.remaining}</strong> of {p.totalQty} remaining</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* All picked up notice */}
+                  {!hasRemaining && (
+                    <div style={{ background: '#e8f5e9', padding: 12, borderRadius: 8, marginBottom: 16, border: '1px solid #a5d6a7' }}>
+                      <strong style={{ color: '#2e7d32' }}>✓ All items picked up</strong>
+                    </div>
+                  )}
+
+                  {/* History entries */}
+                  {order.pickupHistory.slice().reverse().map((entry, idx) => (
+                    <div key={idx} style={{ 
+                      border: '1px solid #e0e0e0', borderRadius: 8, padding: 12, marginBottom: 10,
+                      background: entry.type === 'full' ? '#f1f8e9' : '#fafafa' 
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <div>
+                          <span style={{ 
+                            background: entry.type === 'full' ? '#4caf50' : '#ff9800', 
+                            color: 'white', padding: '2px 8px', borderRadius: 4, fontSize: '0.7rem', fontWeight: 700, marginRight: 8 
+                          }}>
+                            {entry.type === 'full' ? 'FULL PICKUP' : 'PARTIAL PICKUP'}
+                          </span>
+                          <strong style={{ fontSize: '0.85rem' }}>{entry.pickedUpBy}</strong>
+                        </div>
+                        <span style={{ fontSize: '0.8rem', color: '#666' }}>
+                          {new Date(entry.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <div>
+                        {(entry.items || []).map((item, i) => (
+                          <div key={i} style={{ fontSize: '0.8rem', padding: '3px 0', borderTop: i > 0 ? '1px solid #eee' : 'none', display: 'flex', justifyContent: 'space-between' }}>
+                            <span>#{item.partNumber} {PART_TYPES[item.partType]?.label || item.partType || item.description}</span>
+                            <span style={{ fontWeight: 600 }}>Qty: {item.quantity}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
       {/* Parts Section */}
       <div className="card" style={{ marginTop: 20 }}>
@@ -1911,13 +2486,41 @@ function WorkOrderDetailsPage() {
                 <ShoppingCart size={16} /> Order Material
               </button>
             )}
-            <button className="btn btn-outline btn-sm" onClick={() => setShowImportModal(true)}
-              title="Import parts from a PDF or text file">
-              <Upload size={16} /> Import from File
-            </button>
             <button className="btn btn-primary btn-sm" onClick={openAddPartModal}><Plus size={16} />Add Part</button>
           </div>
         </div>
+        {/* Progress Bar */}
+        {order.parts?.length > 0 && (() => {
+          const totalParts = order.parts.length;
+          const completedParts = order.parts.filter(p => p.status === 'completed').length;
+          const inProgressParts = order.parts.filter(p => p.status === 'in_progress').length;
+          const pct = Math.round((completedParts / totalParts) * 100);
+          const isShippedOrArchived = ['shipped', 'archived'].includes(order.status);
+          const displayPct = isShippedOrArchived ? 100 : pct;
+          const displayCompleted = isShippedOrArchived ? totalParts : completedParts;
+          return (
+            <div style={{ padding: '8px 16px 12px', borderBottom: '1px solid #eee' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: '0.85rem', color: '#555' }}>
+                  {displayCompleted} of {totalParts} part{totalParts !== 1 ? 's' : ''} complete
+                  {inProgressParts > 0 && !isShippedOrArchived && <span style={{ color: '#0288d1', marginLeft: 8 }}>({inProgressParts} in progress)</span>}
+                </span>
+                <span style={{ fontSize: '0.85rem', fontWeight: 700, color: displayPct === 100 ? '#2e7d32' : displayPct > 0 ? '#1565c0' : '#999' }}>
+                  {displayPct}%
+                </span>
+              </div>
+              <div style={{ height: 8, background: '#e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%',
+                  width: `${displayPct}%`,
+                  background: displayPct === 100 ? '#4caf50' : '#1976d2',
+                  borderRadius: 4,
+                  transition: 'width 0.5s ease'
+                }} />
+              </div>
+            </div>
+          );
+        })()}
         {hasNoParts ? (
           <div className="empty-state" style={{ padding: 40 }}>
             <Package size={48} color="#9c27b0" />
@@ -1974,19 +2577,47 @@ function WorkOrderDetailsPage() {
                       )}
                       <StatusBadge status={part.status} />
                       {part.materialOrdered && (
-                        <span style={{ background: '#e8f5e9', color: '#2e7d32', padding: '2px 8px', borderRadius: 4, fontSize: '0.7rem' }}>
+                        <span style={{ background: '#e8f5e9', color: '#2e7d32', padding: '2px 8px', borderRadius: 4, fontSize: '0.7rem', cursor: 'pointer' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const current = part.materialPurchaseOrderNumber || '';
+                            const num = current.replace(/\D/g, '');
+                            const newNum = prompt(`Edit PO number (currently ${current}):\nEnter new number:`, num);
+                            if (newNum && newNum !== num) {
+                              const poNum = newNum.replace(/\D/g, '');
+                              if (poNum) {
+                                updateWorkOrderPart(id, part.id, { materialPurchaseOrderNumber: `PO${poNum}` })
+                                  .then(() => loadOrder())
+                                  .catch(err => setError('Failed to update PO number'));
+                              }
+                            }
+                          }}
+                          title="Click to edit PO number">
                           ✓ {part.materialPurchaseOrderNumber}
                         </span>
                       )}
                     </div>
                     {part.clientPartNumber && <div style={{ color: '#666', fontSize: '0.875rem' }}>Client Part#: {part.clientPartNumber}</div>}
-                    {part.heatNumber && <div style={{ color: '#666', fontSize: '0.875rem' }}>Heat#: {part.heatNumber}</div>}
+                    {part.heatBreakdown && part.heatBreakdown.length > 0 ? (
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 2 }}>
+                        {part.heatBreakdown.map((h, i) => (
+                          <span key={i} style={{ background: '#fff3e0', border: '1px solid #ffe0b2', borderRadius: 4, padding: '1px 8px', fontSize: '0.8rem', fontWeight: 600, color: '#795548' }}>
+                            {h.heat}: {h.qty}pc
+                          </span>
+                        ))}
+                      </div>
+                    ) : part.heatNumber ? (
+                      <div style={{ color: '#666', fontSize: '0.875rem' }}>Heat#: {part.heatNumber}</div>
+                    ) : null}
                     {part.cutFileReference && <div style={{ color: '#1565c0', fontSize: '0.875rem' }}>📐 Cut File: {part.cutFileReference}</div>}
                   </div>
                   <div className="actions-row">
                     <select className="form-select" value={part.status} onChange={(e) => handlePartStatusChange(part.id, e.target.value)} style={{ width: 'auto', padding: '4px 8px', fontSize: '0.8rem' }}>
                       <option value="pending">Pending</option><option value="in_progress">In Progress</option><option value="completed">Completed</option>
                     </select>
+                    {part.completedBy && part.status === 'completed' && (
+                      <span style={{ fontSize: '0.75rem', color: '#388e3c', fontStyle: 'italic' }}>by {part.completedBy}</span>
+                    )}
                     <button className="btn btn-sm btn-outline" onClick={() => printPartLabel(part)} title="Print Label"><Tag size={14} /></button>
                     <button className="btn btn-sm btn-outline" onClick={() => openEditPartModal(part)}><Edit size={14} /></button>
                     <button className="btn btn-sm btn-danger" onClick={() => handleDeletePart(part.id)}><Trash2 size={14} /></button>
@@ -2011,12 +2642,48 @@ function WorkOrderDetailsPage() {
                           <strong style={{ color: part.materialOrdered ? '#2e7d32' : '#333' }}>📦 {part.materialDescription}</strong>
                         )}
                         {(part.vendor?.name || part.supplierName) && <span style={{ marginLeft: 8, fontSize: '0.8rem', color: '#666' }}>from {part.vendor?.name || part.supplierName}</span>}
+                        {part.vendorEstimateNumber && <span style={{ marginLeft: 8, fontSize: '0.8rem', color: '#1565c0', fontWeight: 600 }}>Est# {part.vendorEstimateNumber}</span>}
                       </div>
                       {part.materialSource === 'we_order' && (
                         part.materialOrdered ? (
-                          <span style={{ fontSize: '0.8rem', color: '#2e7d32', fontWeight: 600 }}>✓ {part.materialPurchaseOrderNumber}</span>
+                          <span style={{ fontSize: '0.8rem', color: '#2e7d32', fontWeight: 600, cursor: 'pointer', borderBottom: '1px dashed #2e7d32' }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const current = part.materialPurchaseOrderNumber || '';
+                              const num = current.replace(/\D/g, '');
+                              const newNum = prompt(`Edit PO number (currently ${current}):\nEnter new number:`, num);
+                              if (newNum && newNum !== num) {
+                                const poNum = newNum.replace(/\D/g, '');
+                                if (poNum) {
+                                  updateWorkOrderPart(id, part.id, { materialPurchaseOrderNumber: `PO${poNum}` })
+                                    .then(() => loadOrder())
+                                    .catch(err => setError('Failed to update PO number'));
+                                }
+                              }
+                            }}
+                            title="Click to edit PO number">
+                            ✓ {part.materialPurchaseOrderNumber}
+                          </span>
                         ) : (
-                          <span style={{ fontSize: '0.8rem', color: '#e65100' }}>Needs ordering</span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: '0.8rem', color: '#e65100' }}>Needs ordering</span>
+                            <span style={{ fontSize: '0.75rem', color: '#1565c0', cursor: 'pointer', textDecoration: 'underline' }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const choice = window.confirm(
+                                  'Material was received without a PO.\n\n' +
+                                  'OK = Mark as received (material is here)\n' +
+                                  'Cancel = Keep as needs ordering'
+                                );
+                                if (choice) {
+                                  updateWorkOrderPart(id, part.id, { materialOrdered: true, materialPurchaseOrderNumber: 'NO-PO' })
+                                    .then(() => { loadOrder(); })
+                                    .catch(err => setError('Failed to update'));
+                                }
+                              }}>
+                              Material received?
+                            </span>
+                          </span>
                         )
                       )}
                     </div>
@@ -2033,7 +2700,7 @@ function WorkOrderDetailsPage() {
                   {part.outerDiameter && <div><strong>OD:</strong> {part.outerDiameter}</div>}
                   {part.wallThickness && part.wallThickness !== 'SOLID' && <div><strong>Wall:</strong> {part.wallThickness}</div>}
                   {part.wallThickness === 'SOLID' && <div><strong style={{ color: '#e65100' }}>Solid Round Bar</strong></div>}
-                  {part.rollType && <div><strong>Roll:</strong> {part.rollType === 'easy_way' ? 'Easy Way' : 'Hard Way'}</div>}
+                  {part.rollType && <div><strong>Roll:</strong> {part.rollType === 'easy_way' ? 'Easy Way' : part.rollType === 'on_edge' ? 'On Edge' : 'Hard Way'}</div>}
                   {part.radius && !(part.formData || {})._rollToMethod && <div><strong>Radius:</strong> {part.radius}</div>}
                   {part.diameter && !(part.formData || {})._rollToMethod && <div><strong>Diameter:</strong> {part.diameter}</div>}
                   {(part.formData || {})._rollToMethod === 'template' && <div style={{ color: '#e65100' }}><strong>📐 Per Template/Sample</strong></div>}
@@ -2048,6 +2715,19 @@ function WorkOrderDetailsPage() {
                   {part.arcDegrees && <div><strong>Arc:</strong> {part.arcDegrees}°</div>}
                   {(part.formData || {})._completeRings && (part.formData || {})._ringsNeeded && (
                     <div style={{ color: '#2e7d32', fontWeight: 600, marginTop: 4 }}>⭕ {(part.formData || {})._ringsNeeded} complete ring(s) required</div>
+                  )}
+                  {/* Orientation diagram for angle/channel rolls */}
+                  {(part.partType === 'angle_roll' || part.partType === 'channel_roll') && (part.formData || {})._orientationOption && (
+                    <div style={{ marginTop: 8, maxWidth: 250 }}>
+                      <img 
+                        src={`/images/angle-orientation/${part.partType === 'channel_roll' ? 'Channel' : ''}${part.rollType === 'easy_way' ? 'EWOD' : 'HWID'}Op${(part.formData || {})._orientationOption}.png`}
+                        alt={`${part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID'} Option ${(part.formData || {})._orientationOption}`}
+                        style={{ width: '100%', borderRadius: 6, border: '1px solid #ddd' }}
+                      />
+                      <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', marginTop: 2 }}>
+                        {part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID'} Option {(part.formData || {})._orientationOption}
+                      </div>
+                    </div>
                   )}
                   {/* Cone type + segments */}
                   {part.partType === 'cone_roll' && (
@@ -2100,17 +2780,21 @@ function WorkOrderDetailsPage() {
                     <button className="btn btn-sm btn-outline" onClick={() => fileInputRefs.current[part.id]?.click()} disabled={uploadingFiles === part.id}>
                       <Upload size={12} />{uploadingFiles === part.id ? 'Uploading...' : 'Upload'}
                     </button>
-                    <input type="file" multiple ref={el => fileInputRefs.current[part.id] = el} style={{ display: 'none' }} onChange={(e) => handleFileUpload(part.id, Array.from(e.target.files))} />
+                    <input type="file" multiple accept=".pdf,.stp,.step,.dxf,.dwg,.png,.jpg,.jpeg,.gif,.doc,.docx" ref={el => fileInputRefs.current[part.id] = el} style={{ display: 'none' }} onChange={(e) => handleFileUpload(part.id, Array.from(e.target.files))} />
                   </div>
                   {part.files?.length > 0 && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                      {part.files.map(file => (
-                        <div key={file.id} style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#f5f5f5', padding: '4px 8px', borderRadius: 4, fontSize: '0.75rem' }}>
-                          <span style={{ maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.originalName}</span>
+                      {part.files.map(file => {
+                        const isStep = file.fileType === 'step_file' || file.originalName?.match(/\.(step|stp)$/i);
+                        return (
+                        <div key={file.id} style={{ display: 'flex', alignItems: 'center', gap: 4, background: isStep ? '#f3e5f5' : '#f5f5f5', padding: '4px 8px', borderRadius: 4, fontSize: '0.75rem', border: isStep ? '1px solid #ce93d8' : 'none' }}>
+                          {isStep && <span title="STEP/3D File">🧊</span>}
+                          <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isStep ? '#7b1fa2' : 'inherit', fontWeight: isStep ? 600 : 400 }}>{file.originalName}</span>
                           <button onClick={() => handleViewFile(part.id, file.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}><Eye size={12} /></button>
                           <button onClick={() => handleDeleteFile(part.id, file.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#d32f2f' }}><X size={12} /></button>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -2159,6 +2843,12 @@ function WorkOrderDetailsPage() {
                   return grouped;
                 })().map(part => {
                   const isLinkedService = ['fab_service', 'shop_rate'].includes(part.partType) && (part._linkedPartId || (part.formData || {})._linkedPartId);
+                  const isEa = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(part.partType);
+                  const woTotals = calculateTotals();
+                  const lr = (woTotals.minInfo.minimumApplies && woTotals.minInfo.totalLabor > 0 && isEa) ? woTotals.minInfo.adjustedLabor / woTotals.minInfo.totalLabor : 1;
+                  const adjLabor = (parseFloat(part.laborTotal) || 0) * lr;
+                  const laborDelta = (adjLabor - (parseFloat(part.laborTotal) || 0)) * (parseInt(part.quantity) || 1);
+                  const adjPartTotal = isEa ? (parseFloat(part.partTotal) || 0) + laborDelta : (parseFloat(part.partTotal) || 0);
                   return (
                   <tr key={part.id} style={{ borderBottom: '1px solid #eee', background: isLinkedService ? '#fce4ec' : 'transparent' }}>
                     <td style={{ padding: 8 }}>{isLinkedService ? '' : part.partNumber}</td>
@@ -2168,11 +2858,11 @@ function WorkOrderDetailsPage() {
                       {part.materialDescription && <div style={{ fontSize: '0.8rem', color: '#666' }}>{part.materialDescription}</div>}
                     </td>
                     <td style={{ padding: 8, textAlign: 'right' }}>{part.quantity}</td>
-                    <td style={{ padding: 8, textAlign: 'right' }}>{formatCurrency(part.laborTotal)}</td>
+                    <td style={{ padding: 8, textAlign: 'right' }}>{formatCurrency(adjLabor)}</td>
                     <td style={{ padding: 8, textAlign: 'right' }}>{formatCurrency(part.materialTotal)}</td>
                     <td style={{ padding: 8, textAlign: 'right' }}>{formatCurrency(part.setupCharge)}</td>
                     <td style={{ padding: 8, textAlign: 'right' }}>{formatCurrency(part.otherCharges)}</td>
-                    <td style={{ padding: 8, textAlign: 'right', fontWeight: 600 }}>{formatCurrency(part.partTotal)}</td>
+                    <td style={{ padding: 8, textAlign: 'right', fontWeight: 600 }}>{formatCurrency(adjPartTotal)}</td>
                   </tr>
                   );
                 })}
@@ -2263,17 +2953,49 @@ function WorkOrderDetailsPage() {
                   )}
                 </div>
               ) : (
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #eee' }}>
-                  {(editData.taxExempt || order.taxExempt) ? (
-                    <>
+                <div style={{ padding: '8px 0', borderBottom: '1px solid #eee' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={editData.taxExempt || false}
+                        onChange={async (e) => {
+                          const newExempt = e.target.checked;
+                          const updates = { taxExempt: newExempt };
+                          if (!newExempt) { updates.taxExemptReason = ''; updates.taxExemptCertNumber = ''; }
+                          setEditData(prev => ({ ...prev, ...updates }));
+                          try { await updateWorkOrder(id, updates); await loadOrder(); showMessage(newExempt ? 'Marked tax exempt' : 'Tax exemption removed'); } catch(err) { console.error('Tax save error:', err); }
+                        }}
+                      />
+                      <span style={{ fontWeight: 600, fontSize: '0.85rem', color: editData.taxExempt ? '#c62828' : '#666' }}>Tax Exempt</span>
+                    </label>
+                    {!editData.taxExempt && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <input type="number" step="0.01" className="form-input"
+                          value={editData.taxRate || ''}
+                          onChange={(e) => setEditData(prev => ({ ...prev, taxRate: e.target.value }))}
+                          onBlur={async () => { try { await updateWorkOrder(id, { taxRate: editData.taxRate }); showMessage('Tax rate updated'); } catch {} }}
+                          style={{ width: 70, textAlign: 'right', fontSize: '0.85rem', padding: '2px 6px' }}
+                        />
+                        <span style={{ fontSize: '0.85rem', color: '#666' }}>%</span>
+                      </div>
+                    )}
+                  </div>
+                  {editData.taxExempt && (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input className="form-input" placeholder="Reason" value={editData.taxExemptReason || ''}
+                        onChange={(e) => setEditData(prev => ({ ...prev, taxExemptReason: e.target.value }))}
+                        onBlur={async () => { try { await updateWorkOrder(id, { taxExemptReason: editData.taxExemptReason }); } catch {} }}
+                        style={{ flex: 1, fontSize: '0.8rem', padding: '3px 6px' }} />
+                      <input className="form-input" placeholder="Cert #" value={editData.taxExemptCertNumber || ''}
+                        onChange={(e) => setEditData(prev => ({ ...prev, taxExemptCertNumber: e.target.value }))}
+                        onBlur={async () => { try { await updateWorkOrder(id, { taxExemptCertNumber: editData.taxExemptCertNumber }); } catch {} }}
+                        style={{ width: 100, fontSize: '0.8rem', padding: '3px 6px' }} />
+                    </div>
+                  )}
+                  {!editData.taxExempt && calculateTotals().taxAmount > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', color: '#555', marginTop: 2 }}>
                       <span>Tax:</span>
-                      <span style={{ color: '#c62828', fontWeight: 600 }}>EXEMPT{(editData.taxExemptCertNumber || order.taxExemptCertNumber) ? ` (${editData.taxExemptReason || order.taxExemptReason || 'Resale'}${editData.taxExemptCertNumber || order.taxExemptCertNumber ? ' #' + (editData.taxExemptCertNumber || order.taxExemptCertNumber) : ''})` : (editData.taxExemptReason || order.taxExemptReason ? ` (${editData.taxExemptReason || order.taxExemptReason})` : '')}</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Tax ({(parseFloat(order.taxRate) || defaultTaxRate).toFixed(2)}%):</span>
                       <span>{formatCurrency(calculateTotals().taxAmount)}</span>
-                    </>
+                    </div>
                   )}
                 </div>
               )}
@@ -2385,14 +3107,14 @@ function WorkOrderDetailsPage() {
       {/* Add/Edit Part Modal */}
       {showPartModal && (
         <div className="modal-overlay">
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 800 }}>
+          <div className="modal modal-flex" onClick={e => e.stopPropagation()} style={{ maxWidth: 800 }}>
             <div className="modal-header">
               <h3>
                 {editingPart ? 'Edit Part' : 'Add Part'} — {PART_TYPES[selectedPartType]?.icon} {PART_TYPES[selectedPartType]?.label || selectedPartType}
               </h3>
               <button className="btn btn-icon" onClick={() => setShowPartModal(false)}><X size={20} /></button>
             </div>
-            <div className="modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+            <div className="modal-body">
 
               {/* Validation errors */}
               {partFormError && partFormError.length > 0 && (
@@ -2410,7 +3132,7 @@ function WorkOrderDetailsPage() {
                 </div>
                 <div className="form-group">
                   <label className="form-label">Heat Number</label>
-                  <input type="text" className="form-input" value={partData.heatNumber || ''} onChange={(e) => setPartData({ ...partData, heatNumber: e.target.value })} />
+                  <HeatNumberInput partData={partData} setPartData={setPartData} />
                 </div>
                 <div className="form-group" style={{ gridColumn: 'span 2' }}>
                   <label className="form-label">Cut File Reference <span style={{ fontWeight: 400, color: '#999' }}>(DXF/STEP filename for vendor)</span></label>
@@ -2515,15 +3237,146 @@ function WorkOrderDetailsPage() {
 
       {/* Pickup Modal */}
       {showPickupModal && (
-        <div className="modal-overlay" onClick={() => setShowPickupModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header"><h3>Confirm Pickup</h3><button className="btn btn-icon" onClick={() => setShowPickupModal(false)}><X size={20} /></button></div>
-            <div className="modal-body">
-              <div className="form-group"><label className="form-label">Picked Up By</label><input className="form-input" value={pickupData.pickedUpBy} onChange={(e) => setPickupData({ pickedUpBy: e.target.value })} placeholder="Name of person picking up" /></div>
+        <div className="modal-overlay" onClick={() => { setShowPickupModal(false); setPickupData({ pickedUpBy: '', type: null, items: {} }); }}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 600 }}>
+            <div className="modal-header">
+              <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Truck size={22} /> Record Pickup</h3>
+              <button className="btn btn-icon" onClick={() => { setShowPickupModal(false); setPickupData({ pickedUpBy: '', type: null, items: {} }); }}><X size={20} /></button>
             </div>
-            <div className="modal-footer">
-              <button className="btn btn-secondary" onClick={() => setShowPickupModal(false)}>Cancel</button>
-              <button className="btn btn-success" onClick={handlePickup}><Check size={18} />Confirm Pickup</button>
+            <div style={{ padding: 20 }}>
+              {/* Step 1: Picked Up By */}
+              <div className="form-group" style={{ marginBottom: 16 }}>
+                <label className="form-label">Picked Up By</label>
+                <input className="form-input" value={pickupData.pickedUpBy} 
+                  onChange={(e) => setPickupData(prev => ({ ...prev, pickedUpBy: e.target.value }))} 
+                  placeholder="Name of person picking up" />
+              </div>
+
+              {/* Step 2: Full or Partial */}
+              {!pickupData.type && (
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <button className="btn" onClick={() => setPickupData(prev => ({ ...prev, type: 'full' }))}
+                    style={{ flex: 1, padding: 20, background: '#e8f5e9', border: '2px solid #4caf50', borderRadius: 8, cursor: 'pointer', textAlign: 'center' }}>
+                    <Package size={28} style={{ color: '#2e7d32', marginBottom: 6 }} /><br />
+                    <strong style={{ fontSize: '1rem' }}>Full Pickup</strong><br />
+                    <span style={{ fontSize: '0.8rem', color: '#666' }}>All items picked up</span>
+                  </button>
+                  <button className="btn" onClick={() => {
+                    const items = {};
+                    order.parts?.forEach(p => { items[p.id] = { selected: false, useCustomQty: false, customQty: String(p.quantity || 1) }; });
+                    setPickupData(prev => ({ ...prev, type: 'partial', items }));
+                  }}
+                    style={{ flex: 1, padding: 20, background: '#fff3e0', border: '2px solid #ff9800', borderRadius: 8, cursor: 'pointer', textAlign: 'center' }}>
+                    <FileText size={28} style={{ color: '#e65100', marginBottom: 6 }} /><br />
+                    <strong style={{ fontSize: '1rem' }}>Partial Pickup</strong><br />
+                    <span style={{ fontSize: '0.8rem', color: '#666' }}>Select specific items</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Full Pickup Confirmation */}
+              {pickupData.type === 'full' && (() => {
+                const summary = getPickupSummary();
+                const remaining = summary.filter(p => p.remaining > 0);
+                const allAlreadyPicked = remaining.length === 0;
+                return (
+                <div>
+                  {allAlreadyPicked ? (
+                    <div style={{ background: '#f5f5f5', padding: 16, borderRadius: 8, marginBottom: 16, textAlign: 'center' }}>
+                      <strong style={{ color: '#666' }}>All items have already been picked up.</strong>
+                    </div>
+                  ) : (
+                    <div style={{ background: '#e8f5e9', padding: 16, borderRadius: 8, marginBottom: 16 }}>
+                      <strong style={{ color: '#2e7d32' }}>Pick Up Remaining — {remaining.length} item{remaining.length > 1 ? 's' : ''}</strong>
+                      <div style={{ marginTop: 8 }}>
+                        {remaining.map(p => (
+                          <div key={p.id} style={{ fontSize: '0.85rem', padding: '4px 0', borderBottom: '1px solid #c8e6c9', display: 'flex', justifyContent: 'space-between' }}>
+                            <span><strong>#{p.partNumber}</strong> {PART_TYPES[p.partType]?.label || p.partType}</span>
+                            <span style={{ fontWeight: 600 }}>
+                              {p.remaining} of {p.totalQty}
+                              {p.picked > 0 && <span style={{ color: '#888', fontWeight: 400, marginLeft: 6 }}>({p.picked} already shipped)</span>}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button className="btn btn-secondary" onClick={() => setPickupData(prev => ({ ...prev, type: null }))}>Back</button>
+                    <button className="btn btn-success" onClick={handlePickup} disabled={saving || allAlreadyPicked}>
+                      <Check size={18} /> {saving ? 'Processing...' : 'Confirm Pickup'}
+                    </button>
+                  </div>
+                </div>
+                );
+              })()}
+
+              {/* Partial Pickup Selection */}
+              {pickupData.type === 'partial' && (
+                <div>
+                  <div style={{ background: '#fff3e0', padding: 12, borderRadius: 8, marginBottom: 12, fontSize: '0.85rem' }}>
+                    Select items being picked up. Check the qty box to enter a partial quantity for that item.
+                  </div>
+                  
+                  {(() => {
+                    const summary = getPickupSummary();
+                    return summary.map(p => {
+                      const item = pickupData.items[p.id] || { selected: false, useCustomQty: false, customQty: String(p.remaining) };
+                      const maxQty = p.remaining;
+                      return (
+                        <div key={p.id} style={{ 
+                          padding: 12, marginBottom: 8, borderRadius: 8, 
+                          border: item.selected ? '2px solid #ff9800' : '1px solid #eee',
+                          background: maxQty === 0 ? '#f5f5f5' : item.selected ? '#fff8e1' : 'white',
+                          opacity: maxQty === 0 ? 0.5 : 1
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <input type="checkbox" checked={item.selected} disabled={maxQty === 0}
+                              onChange={(e) => setPickupData(prev => ({ 
+                                ...prev, items: { ...prev.items, [p.id]: { ...item, selected: e.target.checked, customQty: String(maxQty) } } 
+                              }))}
+                              style={{ width: 18, height: 18 }} />
+                            <div style={{ flex: 1 }}>
+                              <strong>#{p.partNumber}</strong> {PART_TYPES[p.partType]?.label || p.partType}
+                              {p.materialDescription && <span style={{ color: '#666', fontSize: '0.8rem' }}> — {p.materialDescription}</span>}
+                              <div style={{ fontSize: '0.75rem', color: '#999' }}>
+                                Total: {p.totalQty} | Previously picked: {p.picked} | <strong style={{ color: maxQty > 0 ? '#e65100' : '#999' }}>Remaining: {maxQty}</strong>
+                              </div>
+                            </div>
+                            {item.selected && maxQty > 1 && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <label style={{ fontSize: '0.75rem', color: '#666', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <input type="checkbox" checked={item.useCustomQty}
+                                    onChange={(e) => setPickupData(prev => ({
+                                      ...prev, items: { ...prev.items, [p.id]: { ...item, useCustomQty: e.target.checked, customQty: String(maxQty) } }
+                                    }))} />
+                                  Partial qty
+                                </label>
+                                {item.useCustomQty && (
+                                  <input type="number" min="1" max={maxQty} value={item.customQty}
+                                    onChange={(e) => setPickupData(prev => ({
+                                      ...prev, items: { ...prev.items, [p.id]: { ...item, customQty: e.target.value } }
+                                    }))}
+                                    onFocus={(e) => e.target.select()}
+                                    style={{ width: 60, padding: '4px 6px', textAlign: 'center', border: '2px solid #ff9800', borderRadius: 4, fontWeight: 700 }} />
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                  
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+                    <button className="btn btn-secondary" onClick={() => setPickupData(prev => ({ ...prev, type: null }))}>Back</button>
+                    <button className="btn" onClick={handlePickup} disabled={saving}
+                      style={{ background: '#ff9800', color: 'white', border: 'none' }}>
+                      <Check size={18} /> {saving ? 'Processing...' : 'Record Partial Pickup'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2583,7 +3436,7 @@ function WorkOrderDetailsPage() {
                       />
                       <div style={{ flex: 1 }}>
                         <div><strong>Part #{part.partNumber}:</strong> {part.materialDescription || part.partType}</div>
-                        <div style={{ fontSize: '0.8rem', color: '#666' }}>Qty: {part.quantity}</div>
+                        <div style={{ fontSize: '0.8rem', color: '#666' }}>Qty: {(part.formData || {})?._stockLengthsNeeded || part.quantity}{(part.formData || {})?._stockLengthsNeeded ? ` lengths (${part.quantity} rings)` : ''}</div>
                       </div>
                     </label>
                   ))}
@@ -2766,14 +3619,6 @@ function WorkOrderDetailsPage() {
           </div>
         </div>
       )}
-
-      {/* Import Parts Modal */}
-      <ImportPartsModal
-        isOpen={showImportModal}
-        onClose={() => setShowImportModal(false)}
-        onImportParts={handleImportParts}
-        estimateId={id}
-      />
     </div>
   );
 }

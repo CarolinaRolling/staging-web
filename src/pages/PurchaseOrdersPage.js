@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ShoppingCart, Printer, Edit2, Eye, RefreshCw, Search, Plus, X, Save, Trash2 } from 'lucide-react';
-import { getPONumbers, getNextPONumber, assignPONumber, voidPONumber, deletePONumber } from '../services/api';
+import { ShoppingCart, Printer, Edit2, Eye, RefreshCw, Search, Plus, X, Save, Trash2, Archive, RotateCcw } from 'lucide-react';
+import { getPONumbers, getNextPONumber, assignPONumber, voidPONumber, deletePONumber, archivePONumber, unarchivePONumber } from '../services/api';
 
 function PurchaseOrdersPage() {
   const navigate = useNavigate();
@@ -448,6 +448,13 @@ function PurchaseOrdersPage() {
             >
               Voided
             </button>
+            <button
+              className={`btn btn-sm ${filterStatus === 'archived' ? 'btn-primary' : 'btn-outline'}`}
+              onClick={() => setFilterStatus('archived')}
+              style={filterStatus === 'archived' ? { background: '#616161' } : {}}
+            >
+              Archived
+            </button>
           </div>
         </div>
       </div>
@@ -476,11 +483,12 @@ function PurchaseOrdersPage() {
             </thead>
             <tbody>
               {filteredPOs.map(po => (
-                <tr key={po.id} style={po.status === 'void' ? { opacity: 0.5 } : {}}>
+                <tr key={po.id} style={po.status === 'void' ? { opacity: 0.5 } : po.status === 'archived' ? { opacity: 0.6, background: '#f5f5f5' } : {}}>
                   <td>
-                    <strong style={{ color: po.status === 'void' ? '#c62828' : '#1976d2', textDecoration: po.status === 'void' ? 'line-through' : 'none' }}>
+                    <strong style={{ color: po.status === 'void' ? '#c62828' : po.status === 'archived' ? '#616161' : '#1976d2', textDecoration: po.status === 'void' ? 'line-through' : 'none' }}>
                       PO{po.poNumber}
                     </strong>
+                    {po.status === 'archived' && <span style={{ fontSize: '0.7rem', color: '#999', marginLeft: 6 }}>archived</span>}
                   </td>
                   <td>{po.supplier || <span style={{ color: '#999' }}>—</span>}</td>
                   <td>{po.clientName || <span style={{ color: '#999' }}>—</span>}</td>
@@ -511,6 +519,44 @@ function PurchaseOrdersPage() {
                           title="Edit"
                         >
                           <Edit2 size={14} />
+                        </button>
+                      )}
+                      {po.status === 'active' && (
+                        <button
+                          className="btn btn-sm btn-outline"
+                          onClick={async () => {
+                            try {
+                              await archivePONumber(po.id);
+                              setSuccess(`PO${po.poNumber} archived`);
+                              loadPurchaseOrders();
+                              setTimeout(() => setSuccess(null), 3000);
+                            } catch (err) {
+                              setError(err.response?.data?.error?.message || 'Failed to archive');
+                            }
+                          }}
+                          title="Archive"
+                          style={{ color: '#616161' }}
+                        >
+                          <Archive size={14} />
+                        </button>
+                      )}
+                      {po.status === 'archived' && (
+                        <button
+                          className="btn btn-sm btn-outline"
+                          onClick={async () => {
+                            try {
+                              await unarchivePONumber(po.id);
+                              setSuccess(`PO${po.poNumber} restored to active`);
+                              loadPurchaseOrders();
+                              setTimeout(() => setSuccess(null), 3000);
+                            } catch (err) {
+                              setError(err.response?.data?.error?.message || 'Failed to unarchive');
+                            }
+                          }}
+                          title="Restore to Active"
+                          style={{ color: '#2e7d32' }}
+                        >
+                          <RotateCcw size={14} />
                         </button>
                       )}
                       <button

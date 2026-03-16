@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Edit, Trash2, Users, Building2, Search, Check, X } from 'lucide-react';
 import { getClients, createClient, updateClient, deleteClient, getVendors, createVendor, updateVendor, deleteVendor, verifySinglePermit } from '../services/api';
 
@@ -23,6 +23,7 @@ const isValidResale = (val) => {
 
 const ClientsVendorsPage = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState('clients');
   const [clients, setClients] = useState([]);
   const [vendors, setVendors] = useState([]);
@@ -42,6 +43,24 @@ const ClientsVendorsPage = () => {
   useEffect(() => {
     loadData();
   }, [showInactive]);
+
+  // Auto-open add client form if navigated with ?addClient=Name
+  useEffect(() => {
+    const addClientName = searchParams.get('addClient');
+    if (addClientName && !loading) {
+      setActiveTab('clients');
+      setEditing(null);
+      setFormData({
+        name: addClientName,
+        contactName: '', contactPhone: '', contactEmail: '',
+        address: '', taxStatus: 'taxable', resaleCertificate: '',
+        customTaxRate: '', paymentTerms: '', notes: ''
+      });
+      setShowModal(true);
+      // Clear the query param so it doesn't re-trigger
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, loading]);
 
   const loadData = async () => {
     try {
@@ -275,6 +294,12 @@ const ClientsVendorsPage = () => {
         >
           <Building2 size={18} /> Vendors ({vendors.length})
         </button>
+        <button
+          className={`btn ${activeTab === 'permits' ? 'btn-primary' : 'btn-outline'}`}
+          onClick={() => setActiveTab('permits')}
+        >
+          🔐 Permit Status
+        </button>
       </div>
 
       {/* Search and Actions */}
@@ -335,6 +360,7 @@ const ClientsVendorsPage = () => {
                     <td>
                       <strong>{client.name}</strong>
                       {client.noTag && <span style={{ marginLeft: 8, fontSize: '0.75rem', background: '#fff3e0', color: '#e65100', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>🚫 No Tag</span>}
+                      {client.requiresPartLabels && <span style={{ marginLeft: 8, fontSize: '0.75rem', background: '#e3f2fd', color: '#1565c0', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>🏷️ Part Labels</span>}
                       {client.resaleCertificate && client.permitStatus === 'active' && <span style={{ marginLeft: 6, fontSize: '0.7rem', background: '#e8f5e9', color: '#2e7d32', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>✅ Permit</span>}
                       {client.resaleCertificate && client.permitStatus === 'closed' && <span style={{ marginLeft: 6, fontSize: '0.7rem', background: '#ffebee', color: '#c62828', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>❌ Permit Closed</span>}
                       {client.resaleCertificate && client.permitStatus === 'not_found' && <span style={{ marginLeft: 6, fontSize: '0.7rem', background: '#ffebee', color: '#c62828', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>❌ Permit Not Found</span>}
@@ -621,6 +647,20 @@ const ClientsVendorsPage = () => {
                   </div>
                 )}
               </div>
+              <div style={{ gridColumn: 'span 2', borderTop: '1px solid #e0e0e0', paddingTop: 12, marginTop: 8 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={formData.requiresPartLabels || false} onChange={(e) => setFormData({ ...formData, requiresPartLabels: e.target.checked })}
+                    style={{ width: 18, height: 18, accentColor: '#1565c0' }} />
+                  <span style={{ fontWeight: 600, color: formData.requiresPartLabels ? '#1565c0' : '#333' }}>
+                    🏷️ Part Info Labels — Print part info stickers (Part#, PO#, Heat#) on Android tablets
+                  </span>
+                </label>
+                {formData.requiresPartLabels && (
+                  <div style={{ marginTop: 8, padding: 10, background: '#e3f2fd', borderRadius: 8, fontSize: '0.85rem', color: '#0d47a1' }}>
+                    A "Print Label" button will appear next to each part on the Android tablet. Labels include client part number, purchase order number, and heat number.
+                  </div>
+                )}
+              </div>
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
@@ -677,6 +717,73 @@ const ClientsVendorsPage = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Permits Tab */}
+      {activeTab === 'permits' && (
+        <div className="card">
+          <h3 style={{ marginBottom: 16 }}>🔐 CDTFA Seller's Permit Status</h3>
+          <p style={{ color: '#666', marginBottom: 16, fontSize: '0.9rem' }}>
+            Shows permit verification status for clients with resale certificates on file. Click "Verify" to check a client's permit status with CDTFA.
+          </p>
+          {(() => {
+            const clientsWithPermits = clients.filter(c => c.resaleCertificate);
+            if (clientsWithPermits.length === 0) {
+              return <p style={{ color: '#999', fontStyle: 'italic' }}>No clients have resale certificates on file.</p>;
+            }
+            return (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Client</th>
+                    <th>Permit #</th>
+                    <th>Status</th>
+                    <th>Last Verified</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {clientsWithPermits.map(c => (
+                    <tr key={c.id}>
+                      <td style={{ fontWeight: 600 }}>{c.name}</td>
+                      <td style={{ fontFamily: 'monospace' }}>{c.resaleCertificate}</td>
+                      <td>
+                        <span style={{
+                          padding: '3px 10px', borderRadius: 12, fontSize: '0.75rem', fontWeight: 600,
+                          background: c.permitStatus === 'Active' ? '#e8f5e9' : c.permitStatus === 'Closed' ? '#ffebee' : '#f5f5f5',
+                          color: c.permitStatus === 'Active' ? '#2e7d32' : c.permitStatus === 'Closed' ? '#c62828' : '#666'
+                        }}>
+                          {c.permitStatus || 'Not Verified'}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: '0.85rem', color: '#666' }}>
+                        {c.permitLastVerified ? new Date(c.permitLastVerified).toLocaleDateString() : 'Never'}
+                      </td>
+                      <td>
+                        <button className="btn btn-sm btn-outline" onClick={async () => {
+                          try {
+                            setSuccess('');
+                            setError('');
+                            const res = await verifySinglePermit(c.id);
+                            const result = res.data?.data;
+                            if (result?.status) {
+                              setSuccess(`${c.name}: Permit is ${result.status}`);
+                            }
+                            loadData();
+                          } catch (err) {
+                            setError(`Verification failed for ${c.name}: ${err.response?.data?.error?.message || err.message}`);
+                          }
+                        }} style={{ padding: '4px 12px', fontSize: '0.8rem' }}>
+                          Verify
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          })()}
         </div>
       )}
     </div>
