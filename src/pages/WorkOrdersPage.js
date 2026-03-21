@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Plus, Search, Calendar, Package, MapPin } from 'lucide-react';
 import { getWorkOrders, createWorkOrder, searchClients, getNextDRNumber, getShipmentById } from '../services/api';
@@ -11,11 +11,9 @@ function WorkOrdersPage() {
   const [error, setError] = useState(null);
   const [showNewModal, setShowNewModal] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [searchQuery, setSearchQuery] = useState(() => {
-    return searchParams.get('q') || '';
-  });
+  // Derive search from URL — survives back button navigation
+  const searchQuery = searchParams.get('q') || '';
   const updateSearch = (val) => {
-    setSearchQuery(val);
     if (val) {
       setSearchParams({ q: val }, { replace: true });
     } else {
@@ -83,29 +81,14 @@ function WorkOrdersPage() {
     localStorage.setItem('workorders_sortBy', sortBy);
   }, [sortBy]);
 
-  // Initial load — skip if URL has a search query (search useEffect handles it)
-  const initialSearchRef = useRef(searchQuery);
+  // Load orders or run search based on URL search param
   useEffect(() => {
-    if (!initialSearchRef.current) {
+    if (!searchQuery) {
       loadOrders();
-    }
-    const interval = setInterval(() => {
-      if (!searchQuery) loadOrders(true);
-    }, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Server-side search for finding orders across all statuses (including shipped/archived)
-  const isFirstRun = useRef(true);
-  useEffect(() => {
-    if (!searchQuery || searchQuery.length < 2) {
-      if (searchQuery === '' && !isFirstRun.current) loadOrders();
-      isFirstRun.current = false;
       return;
     }
-    // No debounce on first run (restoring from URL), debounce for typing
-    const delay = isFirstRun.current ? 0 : 400;
-    isFirstRun.current = false;
+    if (searchQuery.length < 2) return;
+    
     const timer = setTimeout(async () => {
       try {
         setLoading(true);
@@ -116,8 +99,16 @@ function WorkOrdersPage() {
       } finally {
         setLoading(false);
       }
-    }, delay);
+    }, 300);
     return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Auto-refresh when not searching
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!searchQuery) loadOrders(true);
+    }, 30000);
+    return () => clearInterval(interval);
   }, [searchQuery]);
 
   // Restore scroll position when returning from a WO detail page
