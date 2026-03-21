@@ -66,14 +66,14 @@ function WalterJoke() {
 
   return (
     <>
-      {/* Walter Icon */}
+      {/* Walter Icon — bottom right, out of the way */}
       <div
         onClick={tellJoke}
         title="Click for a dad joke from Walter!"
         style={{
           position: 'fixed',
-          top: 12,
-          right: 12,
+          bottom: 16,
+          right: 16,
           width: 48,
           height: 48,
           borderRadius: '50%',
@@ -100,27 +100,27 @@ function WalterJoke() {
         />
       </div>
 
-      {/* Speech Bubble */}
+      {/* Speech Bubble — above Walter */}
       {showJoke && (
         <div style={{
           position: 'fixed',
-          top: 12,
-          right: 72,
+          bottom: 76,
+          right: 8,
           zIndex: 1100,
-          maxWidth: 340,
+          maxWidth: 300,
           animation: 'walterFadeIn 0.3s ease-out',
         }}>
-          {/* Bubble arrow pointing right */}
+          {/* Bubble arrow pointing down */}
           <div style={{
             position: 'absolute',
-            right: -8,
-            top: 16,
+            bottom: -8,
+            right: 24,
             width: 0,
             height: 0,
-            borderTop: '8px solid transparent',
-            borderBottom: '8px solid transparent',
-            borderLeft: '8px solid #fff',
-            filter: 'drop-shadow(2px 0 1px rgba(0,0,0,0.1))',
+            borderLeft: '8px solid transparent',
+            borderRight: '8px solid transparent',
+            borderTop: '8px solid #fff',
+            filter: 'drop-shadow(0 2px 1px rgba(0,0,0,0.1))',
           }} />
           {/* Bubble body */}
           <div style={{
@@ -166,8 +166,8 @@ function WalterJoke() {
 
       <style>{`
         @keyframes walterFadeIn {
-          from { opacity: 0; transform: translateX(10px); }
-          to { opacity: 1; transform: translateX(0); }
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
         }
       `}</style>
     </>

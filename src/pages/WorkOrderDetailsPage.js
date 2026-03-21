@@ -27,8 +27,8 @@ import {
   getShipmentByWorkOrderId, getNextPONumber, orderWorkOrderMaterial,
   searchVendors, searchLinkableEstimates, linkEstimateToWorkOrder, unlinkEstimateFromWorkOrder,
   searchClients, getSettings, getUnlinkedShipments, linkShipmentToWorkOrder, unlinkShipmentFromWorkOrder, duplicateWorkOrderToEstimate,
-  getWorkOrderPrintPackage, updateDRNumber, recordPickup,
-  exportWorkOrderIIF
+  getWorkOrderPrintPackage, updateDRNumber, recordPickup, recordPayment, clearPayment,
+  exportWorkOrderIIF, assignInvoiceNumber
 } from '../services/api';
 
 const PART_TYPES = {
@@ -60,6 +60,7 @@ function WorkOrderDetailsPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [order, setOrder] = useState(null);
+  const [woTab, setWoTab] = useState('parts');
   const [clientPaymentTerms, setClientPaymentTerms] = useState(null);
   const [shipment, setShipment] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -105,9 +106,20 @@ function WorkOrderDetailsPage() {
   const [reordering, setReordering] = useState(false);
   const [editingDR, setEditingDR] = useState(false);
   const [drInput, setDrInput] = useState('');
+  const [codConfirmOpen, setCodConfirmOpen] = useState(false);
+  const [codOverrideInput, setCodOverrideInput] = useState('');
+  const [codOverridePassword, setCodOverridePassword] = useState('');
+  const [codAction, setCodAction] = useState(null); // 'checklist' or 'pickup'
+  const [codShowOverride, setCodShowOverride] = useState(false);
+  const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
+  const [paymentForm, setPaymentForm] = useState({ date: new Date().toISOString().split('T')[0], method: '', reference: '' });
 
   useEffect(() => { 
     loadOrder(); loadLaborMinimums(); 
+    // Load COD override password
+    getSettings('cod_override_password').then(res => {
+      if (res.data.data?.value) setCodOverridePassword(res.data.data.value);
+    }).catch(() => {});
     // Auto-refresh every 30 seconds for live progress updates from shop tablets
     const interval = setInterval(() => { loadOrder(); }, 30000);
     return () => clearInterval(interval);
@@ -314,6 +326,14 @@ function WorkOrderDetailsPage() {
     return bestSpecificRule || bestGeneralRule || bestFallbackRule;
   };
 
+  // Round up material cost after markup (matches estimate logic)
+  const roundUpMaterial = (value, rounding) => {
+    if (!rounding || rounding === 'none' || value <= 0) return value;
+    if (rounding === 'dollar') return Math.ceil(value);
+    if (rounding === 'five') return Math.ceil(value / 5) * 5;
+    return value;
+  };
+
   const getMinimumInfo = () => {
     let totalLabor = 0, totalMaterial = 0, highestMinimum = 0, highestMinRule = null;
     const EA_PRICED = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
@@ -324,7 +344,7 @@ function WorkOrderDetailsPage() {
       const laborEach = parseFloat(part.laborTotal) || 0;
       const materialCost = parseFloat(part.materialTotal) || 0;
       const materialMarkup = parseFloat(part.materialMarkupPercent) || (part.formData?.materialMarkupPercent ? parseFloat(part.formData.materialMarkupPercent) : 0);
-      const materialEach = materialCost * (1 + materialMarkup / 100);
+      const materialEach = roundUpMaterial(materialCost * (1 + materialMarkup / 100), part.formData?._materialRounding);
       const qty = parseInt(part.quantity) || 1;
       totalLabor += laborEach * qty;
       totalMaterial += materialEach * qty;
@@ -706,7 +726,7 @@ function WorkOrderDetailsPage() {
         const qty = parseInt(dataToSend.quantity) || 1;
         const matCost = parseFloat(dataToSend.materialTotal) || 0;
         const matMarkup = parseFloat(dataToSend.materialMarkupPercent) || 0;
-        const matEach = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
+        const matEach = roundUpMaterial(Math.round(matCost * (1 + matMarkup / 100) * 100) / 100, dataToSend._materialRounding);
         const labEach = parseFloat(dataToSend.laborTotal) || 0;
         dataToSend.partTotal = (Math.round((matEach + labEach) * qty * 100) / 100).toFixed(2);
       }
@@ -796,7 +816,12 @@ function WorkOrderDetailsPage() {
     }
   };
 
-  const handleViewFile = async (partId, fileId) => {
+  const handleViewFile = async (partId, fileId, fileUrl) => {
+    // S3 files: open directly
+    if (fileUrl && fileUrl.includes('amazonaws.com')) {
+      window.open(fileUrl, '_blank');
+      return;
+    }
     try {
       const response = await downloadPartFile(id, partId, fileId);
       const blob = new Blob([response.data], { type: response.headers['content-type'] || 'application/octet-stream' });
@@ -880,6 +905,10 @@ function WorkOrderDetailsPage() {
       return { ...p, totalQty, picked, remaining };
     });
   };
+
+  // COD payment status — used in print HTML and UI
+  const isCODClient = clientPaymentTerms && (clientPaymentTerms.toUpperCase().includes('COD') || clientPaymentTerms.toUpperCase().includes('C.O.D'));
+  const codPaid = order?.codPaid === true;
 
   // Helper: build work order print HTML
   const buildWorkOrderPrintHtml = (includePricing) => {
@@ -1082,7 +1111,9 @@ function WorkOrderDetailsPage() {
       // Pricing calculations (always calculate, only display if includePricing)
       const matCost = parseFloat(part.materialTotal) || 0;
       const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
-      const matEach = matCost * (1 + matMarkup / 100);
+      const matRounding = part.formData?._materialRounding;
+      const matEachRaw = matCost * (1 + matMarkup / 100);
+      const matEach = matRounding === 'dollar' ? Math.ceil(matEachRaw) : matRounding === 'five' ? Math.ceil(matEachRaw / 5) * 5 : matEachRaw;
       const labEach = parseFloat(part.laborTotal) || 0;
       const unitPrice = matEach + labEach;
       const qty = parseInt(part.quantity) || 1;
@@ -1116,7 +1147,8 @@ function WorkOrderDetailsPage() {
             ${includePricing && pricingHtml ? `<div class="pr-pricing">${(() => {
               const matCost2 = parseFloat(part.materialTotal) || 0;
               const matMarkup2 = parseFloat(part.materialMarkupPercent) || 0;
-              const matEach2 = matCost2 * (1 + matMarkup2 / 100);
+              const matEach2Raw = matCost2 * (1 + matMarkup2 / 100);
+              const matEach2 = matRounding === 'dollar' ? Math.ceil(matEach2Raw) : matRounding === 'five' ? Math.ceil(matEach2Raw / 5) * 5 : matEach2Raw;
               const labEach2 = parseFloat(part.laborTotal) || 0;
               return `${matCost2 ? `<span>Material: ${formatCurrency(matCost2)}${matMarkup2 > 0 ? ' +' + matMarkup2 + '%' : ''}</span>` : ''}${labEach2 ? `<span>Labor: ${formatCurrency(labEach2)}</span>` : ''}`;
             })()}</div>` : ''}
@@ -1185,6 +1217,13 @@ function WorkOrderDetailsPage() {
     </div>
   </div>
   <hr class="divider" />
+
+  ${isCODClient ? `
+  <div style="background:#c62828;color:white;padding:10px 16px;text-align:center;font-weight:900;font-size:16px;letter-spacing:2px;border:3px solid #b71c1c;border-radius:4px;margin-bottom:8px">
+    💰 COD — COLLECT PAYMENT BEFORE RELEASING ORDER 💰
+    ${codPaid ? '<div style="font-size:12px;font-weight:600;margin-top:4px;color:#a5d6a7">✅ PAYMENT RECORDED — ' + (order.paymentMethod || '').toUpperCase() + (order.paymentReference ? ' #' + order.paymentReference : '') + ' on ' + (order.paymentDate ? new Date(order.paymentDate).toLocaleDateString() : 'N/A') + '</div>' : '<div style="font-size:12px;font-weight:600;margin-top:4px;color:#ffcdd2">⚠️ PAYMENT NOT YET CONFIRMED</div>'}
+  </div>
+  ` : ''}
 
   <div class="info-grid">
     <div class="info-item"><label>Client</label><span>${order.clientName}</span></div>
@@ -1313,6 +1352,49 @@ function WorkOrderDetailsPage() {
 
   // Print Production Copy (no pricing + part prints only)
   const printShopOrder = () => generatePrintPackage('production', false);
+
+  // COD payment check — intercepts pickup actions for COD clients
+  
+  const handleCODCheck = (action) => {
+    if (!isCODClient || codPaid) {
+      // Not COD or already confirmed paid — proceed
+      if (action === 'checklist') printPickupChecklist();
+      else if (action === 'pickup') setShowPickupModal(true);
+      return;
+    }
+    // COD client, not yet confirmed — show confirmation dialog
+    setCodAction(action);
+    setCodOverrideInput('');
+    setCodShowOverride(false);
+    setCodConfirmOpen(true);
+  };
+
+  const handleRecordPayment = async () => {
+    if (!paymentForm.method) { setError('Select a payment method'); return; }
+    try {
+      await recordPayment(id, { paymentDate: paymentForm.date, paymentMethod: paymentForm.method, paymentReference: paymentForm.reference });
+      setPaymentDialogOpen(false);
+      showMessage('Payment recorded');
+      loadOrder();
+      // If this was triggered from a pickup action, proceed
+      if (codAction) {
+        setTimeout(() => {
+          if (codAction === 'checklist') printPickupChecklist();
+          else if (codAction === 'pickup') setShowPickupModal(true);
+          setCodAction(null);
+        }, 500);
+      }
+    } catch (err) { setError('Failed to record payment: ' + (err.response?.data?.error?.message || err.message)); }
+  };
+
+  const handleClearPayment = async () => {
+    if (!window.confirm('Clear payment record? This will require re-confirmation before pickup.')) return;
+    try {
+      await clearPayment(id);
+      showMessage('Payment record cleared');
+      loadOrder();
+    } catch (err) { setError('Failed to clear payment'); }
+  };
 
   // Print Pickup Checklist - simple form with checkboxes for loading
   const printPickupChecklist = () => {
@@ -1729,6 +1811,7 @@ function WorkOrderDetailsPage() {
       stored: { background: '#e8f5e9', color: '#2e7d32' },
       shipped: { background: '#f3e5f5', color: '#7b1fa2' },
       archived: { background: '#eceff1', color: '#546e7a' },
+      void: { background: '#ffcdd2', color: '#b71c1c' },
       pending: { background: '#e0e0e0', color: '#555' },
       // Legacy mappings
       draft: { background: '#e3f2fd', color: '#1565c0' },
@@ -1744,6 +1827,7 @@ function WorkOrderDetailsPage() {
       stored: 'Stored',
       shipped: 'Shipped',
       archived: 'Archived',
+      void: '⛔ VOID',
       pending: 'Pending',
       draft: 'Received',
       in_progress: 'Processing',
@@ -1760,6 +1844,49 @@ function WorkOrderDetailsPage() {
 
   return (
     <div>
+      {/* COD Banner — full width, above header */}
+      {isCODClient && (
+        <div style={{ borderRadius: '8px 8px 0 0', border: '3px solid #b71c1c', borderBottom: 'none', overflow: 'hidden', marginBottom: 0 }}>
+          <div style={{ background: '#c62828', color: 'white', padding: '10px 24px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+            <span style={{ fontSize: '1.8rem' }}>💰</span>
+            <span style={{ fontSize: '1.4rem', fontWeight: 900, letterSpacing: 2 }}>COD — COLLECT PAYMENT BEFORE SHIPPING</span>
+            <span style={{ fontSize: '1.8rem' }}>💰</span>
+          </div>
+          {codPaid ? (
+            <div style={{ background: '#E8F5E9', padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '2px solid #A5D6A7' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span style={{ fontSize: '1.5rem' }}>✅</span>
+                <div>
+                  <div style={{ fontWeight: 700, color: '#2E7D32', fontSize: '1rem' }}>PAYMENT CONFIRMED</div>
+                  <div style={{ fontSize: '0.85rem', color: '#555' }}>
+                    {order.paymentMethod && <span style={{ background: '#C8E6C9', padding: '2px 8px', borderRadius: 4, fontWeight: 600, marginRight: 8 }}>{order.paymentMethod}</span>}
+                    {order.paymentReference && <span style={{ marginRight: 8 }}>Ref: <strong>{order.paymentReference}</strong></span>}
+                    {order.paymentDate && <span>on {new Date(order.paymentDate).toLocaleDateString()}</span>}
+                    {order.paymentRecordedBy && <span style={{ color: '#888', marginLeft: 8 }}> — by {order.paymentRecordedBy}</span>}
+                  </div>
+                </div>
+              </div>
+              <button className="btn btn-sm btn-outline" onClick={handleClearPayment} style={{ color: '#c62828', borderColor: '#c62828', fontSize: '0.75rem' }}>
+                Clear Payment
+              </button>
+            </div>
+          ) : (
+            <div style={{ background: '#FFF3E0', padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '2px solid #FFB74D' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span style={{ fontSize: '1.5rem' }}>⚠️</span>
+                <div>
+                  <div style={{ fontWeight: 700, color: '#E65100', fontSize: '1rem' }}>PAYMENT NOT CONFIRMED</div>
+                  <div style={{ fontSize: '0.85rem', color: '#666' }}>Record payment before authorizing pickup</div>
+                </div>
+              </div>
+              <button className="btn" onClick={() => { setPaymentForm({ date: new Date().toISOString().split('T')[0], method: '', reference: '' }); setPaymentDialogOpen(true); }}
+                style={{ background: '#388E3C', color: 'white', border: 'none', fontWeight: 700, padding: '10px 20px', fontSize: '0.95rem' }}>
+                💳 Record Payment
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <div className="detail-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <button className="btn btn-icon btn-secondary" onClick={() => navigate('/inventory')}><ArrowLeft size={20} /></button>
@@ -1789,13 +1916,48 @@ function WorkOrderDetailsPage() {
             )}
             <div style={{ color: '#666', fontSize: '0.875rem', display: 'flex', alignItems: 'center', gap: 12 }}>
               <span>{order.clientName}</span>
-              <StatusBadge status={hasNoParts ? 'pending' : order.status} />
+              <StatusBadge status={order.isVoided ? 'void' : hasNoParts ? 'pending' : order.status} />
               {hasNoParts && <span style={{ color: '#9c27b0', fontSize: '0.8rem' }}>(Awaiting Instructions)</span>}
             </div>
           </div>
         </div>
+
+        {/* Void Banner */}
+        {(order.isVoided || order.status === 'void') && (
+          <div style={{ 
+            margin: '0 0 12px', padding: '12px 20px', 
+            background: 'repeating-linear-gradient(45deg, #ffcdd2, #ffcdd2 10px, #ffebee 10px, #ffebee 20px)',
+            border: '3px solid #c62828', borderRadius: 8, 
+            display: 'flex', alignItems: 'center', gap: 12
+          }}>
+            <span style={{ fontSize: '2rem' }}>⛔</span>
+            <div>
+              <div style={{ fontWeight: 800, color: '#b71c1c', fontSize: '1.2rem', letterSpacing: 2 }}>VOIDED</div>
+              {order.voidReason && <div style={{ color: '#c62828', fontSize: '0.9rem' }}>{order.voidReason}</div>}
+              {order.voidedBy && order.voidedAt && (
+                <div style={{ color: '#e57373', fontSize: '0.8rem' }}>
+                  by {order.voidedBy} on {new Date(order.voidedAt).toLocaleDateString()}
+                </div>
+              )}
+              <div style={{ color: '#888', fontSize: '0.75rem', marginTop: 4 }}>
+                POs and material records are preserved for expense tracking. This order will not be invoiced.
+              </div>
+              <button onClick={async () => {
+                if (!window.confirm('Remove void status from this work order? It will become active and eligible for invoicing again.')) return;
+                try {
+                  await updateWorkOrder(order.id, { isVoided: false, voidedAt: null, voidedBy: null, voidReason: null });
+                  setOrder({ ...order, isVoided: false, voidedAt: null, voidedBy: null, voidReason: null });
+                  showMessage('Void removed — work order is active again');
+                } catch (err) { setError('Failed to unvoid'); }
+              }} style={{ marginTop: 8, background: 'white', border: '1px solid #c62828', color: '#c62828', padding: '4px 12px', borderRadius: 6, cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>
+                ↩️ Remove Void
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="actions-row">
-          {order.status !== 'archived' && (
+          {!(order.isVoided || order.status === 'void') && order.status !== 'archived' && (
             <>
               <select className="form-select" value={order.status} onChange={(e) => handleStatusChange(e.target.value)} style={{ width: 'auto' }}>
                 <option value="waiting_for_materials">Waiting for Materials</option>
@@ -1824,8 +1986,9 @@ function WorkOrderDetailsPage() {
                 <option value="urgent">🔴 Urgent</option>
               </select>
               {(order.status === 'stored' || (order.pickupHistory?.length > 0 && getPickupSummary().some(p => p.remaining > 0))) && (
-                <button className="btn btn-success" onClick={() => setShowPickupModal(true)}>
+                <button className="btn btn-success" onClick={() => handleCODCheck('pickup')}>
                   <Check size={18} />{order.pickupHistory?.length > 0 ? 'Continue Shipment' : 'Ship'}
+                  {isCODClient && !codPaid && <span style={{ marginLeft: 6, fontSize: '0.7rem' }}>💰</span>}
                 </button>
               )}
             </>
@@ -1833,51 +1996,74 @@ function WorkOrderDetailsPage() {
           <div style={{ position: 'relative' }}>
             <button className="btn btn-primary" onClick={() => setShowPrintMenu(!showPrintMenu)}><Printer size={18} />Print</button>
             {showPrintMenu && (
-              <div style={{ position: 'absolute', top: '100%', right: 0, background: 'white', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 100, minWidth: 280 }}>
-                <div style={{ padding: '8px 16px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Open in Browser (Print)</div>
-                <button onClick={printFullWorkOrder} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
-                  📋 Full Work Order<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Details + pricing + prints + POs</span>
+              <div style={{ position: 'absolute', top: '100%', right: 0, background: 'white', border: '1px solid #ddd', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.2)', zIndex: 100, minWidth: 340, padding: 8 }}>
+                
+                <div style={{ padding: '6px 12px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Full Work Order</div>
+                <div style={{ display: 'flex', gap: 6, padding: '4px 8px 8px' }}>
+                  <button onClick={printFullWorkOrder} style={{ flex: 1, padding: '14px 12px', border: '2px solid #1565C0', background: '#E3F2FD', borderRadius: 8, cursor: 'pointer', textAlign: 'center', fontWeight: 700, fontSize: '0.9rem', color: '#1565C0' }}>
+                    🖨️ Print
+                  </button>
+                  <button onClick={() => generatePrintPackage('full', true)} style={{ flex: 1, padding: '14px 12px', border: '2px solid #1565C0', background: 'white', borderRadius: 8, cursor: 'pointer', textAlign: 'center', fontWeight: 700, fontSize: '0.9rem', color: '#1565C0' }}>
+                    ⬇️ Download
+                  </button>
+                </div>
+                <div style={{ padding: '2px 12px', fontSize: '0.75rem', color: '#888', marginBottom: 4 }}>Details + pricing + all documents + POs</div>
+                
+                <div style={{ borderTop: '2px solid #eee', margin: '6px 0' }}></div>
+                
+                <div style={{ padding: '6px 12px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Production Copy</div>
+                <div style={{ display: 'flex', gap: 6, padding: '4px 8px 8px' }}>
+                  <button onClick={printShopOrder} style={{ flex: 1, padding: '14px 12px', border: '2px solid #E65100', background: '#FFF3E0', borderRadius: 8, cursor: 'pointer', textAlign: 'center', fontWeight: 700, fontSize: '0.9rem', color: '#E65100' }}>
+                    🖨️ Print
+                  </button>
+                  <button onClick={() => generatePrintPackage('production', true)} style={{ flex: 1, padding: '14px 12px', border: '2px solid #E65100', background: 'white', borderRadius: 8, cursor: 'pointer', textAlign: 'center', fontWeight: 700, fontSize: '0.9rem', color: '#E65100' }}>
+                    ⬇️ Download
+                  </button>
+                </div>
+                <div style={{ padding: '2px 12px', fontSize: '0.75rem', color: '#888', marginBottom: 4 }}>Details (no pricing) + all documents</div>
+                
+                <div style={{ borderTop: '2px solid #eee', margin: '6px 0' }}></div>
+                
+                <div style={{ padding: '6px 12px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Pickup / Loading</div>
+                <button onClick={() => handleCODCheck('checklist')} style={{ display: 'block', width: '100%', padding: '14px 16px', border: '2px solid #388E3C', background: '#E8F5E9', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: '0.9rem', color: '#388E3C', textAlign: 'center', margin: '4px 0' }}>
+                  ☑️ Pickup Checklist
+                  {isCODClient && !codPaid && <span style={{ display: 'block', fontWeight: 600, fontSize: '0.75rem', color: '#c62828', marginTop: 2 }}>⚠️ COD — Payment confirmation required</span>}
                 </button>
-                <button onClick={printShopOrder} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
-                  🔧 Production Copy<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Details (no pricing) + part prints only</span>
-                </button>
-                <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
-                <div style={{ padding: '8px 16px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Save to File</div>
-                <button onClick={() => generatePrintPackage('full', true)} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
-                  ⬇️ Full Package PDF<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Same as above, saves to downloads</span>
-                </button>
-                <button onClick={() => generatePrintPackage('production', true)} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
-                  ⬇️ Production Package PDF<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Same as above, saves to downloads</span>
-                </button>
-                <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
-                <div style={{ padding: '8px 16px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>Pickup / Loading</div>
-                <button onClick={printPickupChecklist} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
-                  ☑️ Pickup Checklist<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Checkboxes for each part — for loading crew</span>
-                </button>
-                <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
-                <div style={{ padding: '8px 16px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>QuickBooks</div>
+                
+                <div style={{ borderTop: '2px solid #eee', margin: '6px 0' }}></div>
+                
+                <div style={{ padding: '6px 12px 4px', fontSize: '0.7rem', color: '#999', textTransform: 'uppercase', fontWeight: 700, letterSpacing: 0.5 }}>QuickBooks</div>
                 <button onClick={async () => {
                   try {
                     setShowPrintMenu(false);
+                    // Assign invoice number if not already assigned
+                    if (!order.invoiceNumber) {
+                      const assignRes = await assignInvoiceNumber(order.id);
+                      order.invoiceNumber = assignRes.data.data.invoiceNumber;
+                      showMessage(`Invoice #${order.invoiceNumber} assigned`);
+                    }
                     const response = await exportWorkOrderIIF(order.id);
-                    const blob = new Blob([response.data], { type: 'text/plain' });
+                    const iifContent = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+                    const blob = new Blob([iifContent], { type: 'text/plain' });
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `invoice-${order.drNumber ? 'DR-' + order.drNumber : order.orderNumber}-${(order.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.iif`;
+                    a.download = `invoice-${order.invoiceNumber || order.drNumber || order.orderNumber}-${(order.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.iif`;
                     document.body.appendChild(a);
                     a.click();
                     window.URL.revokeObjectURL(url);
                     a.remove();
-                    showMessage('QuickBooks IIF file downloaded');
+                    showMessage(`IIF exported — Invoice #${order.invoiceNumber}`);
+                    loadOrder();
                   } catch (err) {
                     setError(err.response?.data?.error?.message || 'Failed to export IIF');
                   }
-                }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', fontWeight: 600 }}>
-                  📗 Export Invoice (.iif)<br/><span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#666' }}>Import into QuickBooks Desktop via File → Utilities → Import</span>
+                }} style={{ display: 'block', width: '100%', padding: '14px 16px', border: '2px solid #2E7D32', background: 'white', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: '0.9rem', color: '#2E7D32', textAlign: 'center', margin: '4px 0' }}>
+                  📗 Export Invoice (.iif)
                 </button>
-                <div style={{ borderTop: '1px solid #eee', margin: '4px 0' }}></div>
-                <button onClick={() => { setShowPrintMenu(false); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', color: '#666', fontSize: '0.9rem' }}>Cancel</button>
+                
+                <div style={{ borderTop: '2px solid #eee', margin: '6px 0' }}></div>
+                <button onClick={() => { setShowPrintMenu(false); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: '#f5f5f5', borderRadius: 8, cursor: 'pointer', color: '#666', fontSize: '0.9rem', textAlign: 'center', fontWeight: 600 }}>Cancel</button>
               </div>
             )}
           </div>
@@ -2283,6 +2469,32 @@ function WorkOrderDetailsPage() {
                   >
                     <X size={14} />
                   </button>
+                  {order.estimateId && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const { sendVendorPo } = await import('../services/api');
+                          const res = await sendVendorPo(id, {});
+                          const draftUrl = res.data.data?.draftUrl;
+                          if (draftUrl) {
+                            window.open(draftUrl, '_blank');
+                            showMessage('PO draft created — review and send in Gmail');
+                          }
+                        } catch (err) {
+                          const msg = err.response?.data?.error?.message || 'Failed';
+                          if (msg.includes('No vendor RFQ')) {
+                            setError('No vendor RFQ was sent for this estimate. Send an RFQ from the estimate first.');
+                          } else {
+                            setError(msg);
+                          }
+                        }
+                      }}
+                      style={{ background: '#7B1FA2', color: 'white', border: 'none', borderRadius: 4, cursor: 'pointer', padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.8rem', fontWeight: 600 }}
+                      title="Email PO to Vendor"
+                    >
+                      📤 Email
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -2297,22 +2509,54 @@ function WorkOrderDetailsPage() {
           if (missingPOs.length === 0) return null;
           return (
             <div style={{ marginTop: 12, padding: 12, background: '#ffebee', borderRadius: 8, border: '1px solid #ef9a9a' }}>
-              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#c62828', marginBottom: 8 }}>Missing PO Documents</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#c62828' }}>Missing PO Documents</div>
+                <button onClick={async () => {
+                  if (!window.confirm('Clear PO numbers from these parts? The parts will keep their vendor but the PO assignment will be removed.')) return;
+                  try {
+                    for (const po of missingPOs) {
+                      const affectedParts = (order.parts || []).filter(p => p.materialPurchaseOrderNumber === po);
+                      for (const part of affectedParts) {
+                        await updateWorkOrderPart(id, part.id, { materialPurchaseOrderNumber: null, materialOrdered: false, materialOrderedAt: null });
+                      }
+                    }
+                    showMessage('PO assignments cleared');
+                    await loadOrder();
+                  } catch (err) { setError('Failed to clear POs'); }
+                }} style={{ background: 'none', border: '1px solid #ef9a9a', color: '#c62828', padding: '3px 10px', borderRadius: 4, cursor: 'pointer', fontSize: '0.8rem' }}>
+                  ✕ Dismiss All
+                </button>
+              </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {missingPOs.map(po => (
-                  <button key={po} onClick={async () => {
-                    try {
-                      await createPODocument(id, po);
-                      showMessage(`${po} PDF regenerated`);
-                      await loadOrder();
-                    } catch (err) {
-                      setError(`Failed to regenerate ${po}: ${err.response?.data?.error?.message || err.message}`);
-                    }
-                  }} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'white', border: '1px solid #ef9a9a', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontSize: '0.85rem' }}>
-                    <RefreshCw size={14} color="#c62828" />
-                    <strong style={{ color: '#c62828' }}>{po}</strong>
-                    <span style={{ color: '#666' }}>— Regenerate PDF</span>
-                  </button>
+                  <div key={po} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <button onClick={async () => {
+                      try {
+                        await createPODocument(id, po);
+                        showMessage(`${po} PDF regenerated`);
+                        await loadOrder();
+                      } catch (err) {
+                        setError(`Failed to regenerate ${po}: ${err.response?.data?.error?.message || err.message}`);
+                      }
+                    }} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'white', border: '1px solid #ef9a9a', borderRadius: '6px 0 0 6px', padding: '6px 12px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                      <RefreshCw size={14} color="#c62828" />
+                      <strong style={{ color: '#c62828' }}>{po}</strong>
+                      <span style={{ color: '#666' }}>— Regenerate</span>
+                    </button>
+                    <button onClick={async () => {
+                      try {
+                        const affectedParts = (order.parts || []).filter(p => p.materialPurchaseOrderNumber === po);
+                        for (const part of affectedParts) {
+                          await updateWorkOrderPart(id, part.id, { materialPurchaseOrderNumber: null, materialOrdered: false, materialOrderedAt: null });
+                        }
+                        showMessage(`${po} cleared from parts`);
+                        await loadOrder();
+                      } catch (err) { setError('Failed to clear PO'); }
+                    }} style={{ background: 'white', border: '1px solid #ef9a9a', borderLeft: 'none', borderRadius: '0 6px 6px 0', padding: '6px 8px', cursor: 'pointer', color: '#999', fontSize: '0.85rem' }}
+                      title={`Remove ${po} from parts`}>
+                      ✕
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -2463,6 +2707,30 @@ function WorkOrderDetailsPage() {
         </div>
       )}
 
+      {/* Tab Navigation */}
+      <div id="wo-tabs" style={{ display: 'flex', gap: 0, borderBottom: '2px solid #e0e0e0', marginTop: 20, marginBottom: 0 }}>
+        {[
+          { key: 'parts', label: '📦 Parts', count: order.parts?.length || 0 },
+          { key: 'materials', label: '📋 Materials' },
+          { key: 'summary', label: '📊 Summary' }
+        ].map(tab => (
+          <button key={tab.key} onClick={(e) => { e.preventDefault(); setWoTab(tab.key); setTimeout(() => document.getElementById('wo-tabs')?.scrollIntoView({ behavior: 'instant', block: 'start' }), 0); }}
+            style={{
+              padding: '10px 20px', border: 'none', cursor: 'pointer',
+              background: woTab === tab.key ? '#1976d2' : 'transparent',
+              color: woTab === tab.key ? 'white' : '#555',
+              fontWeight: woTab === tab.key ? 700 : 500,
+              fontSize: '0.95rem', borderRadius: '8px 8px 0 0',
+              transition: 'all 0.15s'
+            }}>
+            {tab.label}{tab.count !== undefined ? ` (${tab.count})` : ''}
+          </button>
+        ))}
+      </div>
+
+      {/* ===== PARTS TAB ===== */}
+      {woTab === 'parts' && (
+      <>
       {/* Parts Section */}
       <div className="card" style={{ marginTop: 20 }}>
         <div className="card-header">
@@ -2790,7 +3058,7 @@ function WorkOrderDetailsPage() {
                         <div key={file.id} style={{ display: 'flex', alignItems: 'center', gap: 4, background: isStep ? '#f3e5f5' : '#f5f5f5', padding: '4px 8px', borderRadius: 4, fontSize: '0.75rem', border: isStep ? '1px solid #ce93d8' : 'none' }}>
                           {isStep && <span title="STEP/3D File">🧊</span>}
                           <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isStep ? '#7b1fa2' : 'inherit', fontWeight: isStep ? 600 : 400 }}>{file.originalName}</span>
-                          <button onClick={() => handleViewFile(part.id, file.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}><Eye size={12} /></button>
+                          <button onClick={() => handleViewFile(part.id, file.id, file.url)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}><Eye size={12} /></button>
                           <button onClick={() => handleDeleteFile(part.id, file.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#d32f2f' }}><X size={12} /></button>
                         </div>
                         );
@@ -3070,6 +3338,244 @@ function WorkOrderDetailsPage() {
           )}
         </div>
       </div>
+      </>
+      )}
+
+      {/* ===== MATERIALS TAB ===== */}
+      {woTab === 'materials' && (
+        <div className="card" style={{ marginTop: 0, minHeight: '70vh' }}>
+          <h3 className="card-title" style={{ marginBottom: 16 }}>📋 Bill of Materials</h3>
+          {(() => {
+            const allParts = order.parts || [];
+            const materialParts = allParts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
+            if (materialParts.length === 0) return <p style={{ color: '#888', textAlign: 'center', padding: 20 }}>No parts added yet</p>;
+
+            const bySource = { customer_supplied: [], we_order: [], in_stock: [] };
+            materialParts.forEach(p => {
+              const src = p.materialSource || 'customer_supplied';
+              if (!bySource[src]) bySource[src] = [];
+              bySource[src].push(p);
+            });
+
+            const byVendor = {};
+            bySource.we_order.forEach(p => {
+              const vKey = p.supplierName || 'Unassigned Vendor';
+              if (!byVendor[vKey]) byVendor[vKey] = { vendorId: p.vendorId, parts: [] };
+              byVendor[vKey].parts.push(p);
+            });
+
+            const renderPart = (p) => {
+              const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+              const desc = fd._materialDescription || p.materialDescription || PART_TYPES[p.partType]?.label || '';
+              return (
+                <div key={p.id} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Part #{p.partNumber}</span>
+                    <span style={{ color: '#555', marginLeft: 8, fontSize: '0.85rem' }}>({p.quantity || 1}pc) {desc}</span>
+                    {p.materialReceived && <span style={{ marginLeft: 8, color: '#2e7d32', fontSize: '0.8rem' }}>✅ Received</span>}
+                    {p.materialOrdered && !p.materialReceived && <span style={{ marginLeft: 8, color: '#ff9800', fontSize: '0.8rem' }}>📦 Ordered — {p.materialPurchaseOrderNumber}</span>}
+                    {!p.materialOrdered && !p.materialReceived && p.materialSource === 'we_order' && <span style={{ marginLeft: 8, color: '#c62828', fontSize: '0.8rem' }}>⚠ Not ordered</span>}
+                    {p.cutFileReference && <span style={{ marginLeft: 8, color: '#1565c0', fontSize: '0.8rem' }}>📐 {p.cutFileReference}</span>}
+                  </div>
+                  <span style={{ fontWeight: 600, color: '#E65100' }}>${(parseFloat(p.materialTotal) || 0).toFixed(2)}</span>
+                </div>
+              );
+            };
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {bySource.customer_supplied.length > 0 && (
+                  <div style={{ border: '1px solid #e0e0e0', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 16px', background: '#f5f5f5', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #e0e0e0' }}>
+                      👤 Client Supplied ({bySource.customer_supplied.length})
+                    </div>
+                    {bySource.customer_supplied.map(renderPart)}
+                  </div>
+                )}
+
+                {bySource.in_stock.length > 0 && (
+                  <div style={{ border: '1px solid #c8e6c9', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 16px', background: '#e8f5e9', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #c8e6c9' }}>
+                      🏭 In Stock ({bySource.in_stock.length})
+                    </div>
+                    {bySource.in_stock.map(renderPart)}
+                  </div>
+                )}
+
+                {Object.entries(byVendor).map(([vendorName, { parts: vParts }]) => (
+                  <div key={vendorName} style={{ border: '1px solid #CE93D8', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 16px', background: '#F3E5F5', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #CE93D8' }}>
+                      🏢 {vendorName} ({vParts.length})
+                    </div>
+                    {vParts.map(renderPart)}
+                    <div style={{ padding: '8px 16px', background: '#fafafa', borderTop: '1px solid #f0f0f0', display: 'flex', justifyContent: 'flex-end', fontWeight: 700, fontSize: '0.9rem', color: '#E65100' }}>
+                      Vendor Total: ${vParts.reduce((s, p) => s + (parseFloat(p.materialTotal) || 0), 0).toFixed(2)}
+                    </div>
+                  </div>
+                ))}
+
+                {allParts.some(p => p.outsideProcessingVendorName) && (
+                  <div style={{ border: '1px solid #FFE0B2', borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 16px', background: '#FFF3E0', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #FFE0B2' }}>
+                      🏭 Outside Processing
+                    </div>
+                    {allParts.filter(p => p.outsideProcessingVendorName).map(p => (
+                      <div key={p.id} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Part #{p.partNumber}</span>
+                          <span style={{ color: '#E65100', marginLeft: 8, fontSize: '0.85rem' }}>{p.outsideProcessingVendorName}</span>
+                          <span style={{ color: '#888', marginLeft: 8, fontSize: '0.8rem' }}>{p.outsideProcessingDescription}</span>
+                          {p.outsideProcessingPONumber && <span style={{ marginLeft: 8, color: '#2e7d32', fontSize: '0.8rem' }}>✅ {p.outsideProcessingPONumber}</span>}
+                        </div>
+                        <span style={{ fontWeight: 600, color: '#E65100' }}>${((parseFloat(p.outsideProcessingCost) || 0) + (parseFloat(p.outsideProcessingTransportCost) || 0)).toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ===== SUMMARY TAB ===== */}
+      {woTab === 'summary' && (
+        <div className="card" style={{ marginTop: 0, minHeight: '70vh' }}>
+          <h3 className="card-title" style={{ marginBottom: 20 }}>📊 Job Cost Summary</h3>
+          {(() => {
+            const allParts = order.parts || [];
+            const materialParts = allParts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
+
+            let totalMaterialCost = 0, totalMaterialBilled = 0, totalLaborInHouse = 0;
+            let totalOutsideCost = 0, totalOutsideBilled = 0;
+            let totalTransportCost = 0, totalTransportBilled = 0;
+
+            materialParts.forEach(p => {
+              const qty = parseInt(p.quantity) || 1;
+              const matCost = parseFloat(p.materialTotal) || 0;
+              const matMarkup = parseFloat(p.materialMarkupPercent) || 0;
+              const matBilled = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
+              totalMaterialCost += matCost * qty;
+              totalMaterialBilled += matBilled * qty;
+              totalLaborInHouse += (parseFloat(p.laborTotal) || 0) * qty;
+
+              const opCost = parseFloat(p.outsideProcessingCost) || 0;
+              const opMarkup = parseFloat(p.outsideProcessingMarkupPercent) || 0;
+              totalOutsideCost += opCost * qty;
+              totalOutsideBilled += Math.round(opCost * (1 + opMarkup / 100) * 100) / 100 * qty;
+
+              const tCost = parseFloat(p.outsideProcessingTransportCost) || 0;
+              const tMarkup = parseFloat(p.outsideProcessingTransportMarkupPercent) || 0;
+              totalTransportCost += tCost * qty;
+              totalTransportBilled += Math.round(tCost * (1 + tMarkup / 100) * 100) / 100 * qty;
+            });
+
+            let totalServicesCost = 0;
+            allParts.filter(p => ['fab_service', 'shop_rate'].includes(p.partType)).forEach(p => {
+              totalServicesCost += parseFloat(p.partTotal) || 0;
+            });
+
+            const trucking = parseFloat(order.truckingCost) || 0;
+            const totalExpenses = totalMaterialCost + totalOutsideCost + totalTransportCost + trucking;
+            const totals = calculateTotals();
+            const totalRevenue = totals.grandTotal;
+            const grossProfit = totalRevenue - totalExpenses;
+            const margin = totalRevenue > 0 ? Math.round((grossProfit / totalRevenue) * 100) : 0;
+            const totalMarkupProfit = (totalMaterialBilled - totalMaterialCost) + (totalOutsideBilled - totalOutsideCost) + (totalTransportBilled - totalTransportCost);
+
+            const row = (label, amount, opts = {}) => (
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: opts.size || '0.9rem', color: opts.color || '#333', fontWeight: opts.bold ? 700 : 400, borderTop: opts.border ? '2px solid #e0e0e0' : 'none', marginTop: opts.border ? 8 : 0, paddingTop: opts.border ? 12 : 6 }}>
+                <span>{label}</span>
+                <span>{typeof amount === 'string' ? amount : formatCurrency(amount)}</span>
+              </div>
+            );
+
+            return (
+              <div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 24 }}>
+                  <div style={{ padding: 16, background: '#FFF3E0', borderRadius: 10, border: '1px solid #FFE0B2' }}>
+                    <h4 style={{ margin: '0 0 12px', color: '#E65100', fontSize: '1rem' }}>💰 Our Costs</h4>
+                    {row('Material (our cost)', totalMaterialCost)}
+                    {totalOutsideCost > 0 && row('Outside Processing', totalOutsideCost)}
+                    {totalTransportCost > 0 && row('Transport (outside)', totalTransportCost)}
+                    {trucking > 0 && row('Trucking to Client', trucking)}
+                    {row('Total Expenses', totalExpenses, { bold: true, border: true, color: '#c62828' })}
+                  </div>
+                  <div style={{ padding: 16, background: '#E8F5E9', borderRadius: 10, border: '1px solid #C8E6C9' }}>
+                    <h4 style={{ margin: '0 0 12px', color: '#2e7d32', fontSize: '1rem' }}>💵 Client Pays</h4>
+                    {row('Material (with markup)', totalMaterialBilled)}
+                    {row('In-House Labor', totalLaborInHouse)}
+                    {totalOutsideBilled > 0 && row('Outside Processing (marked up)', totalOutsideBilled)}
+                    {totalTransportBilled > 0 && row('Transport (marked up)', totalTransportBilled)}
+                    {totalServicesCost > 0 && row('Fab Services / Shop Rate', totalServicesCost)}
+                    {trucking > 0 && row('Trucking', trucking)}
+                    {totals.discountAmt > 0 && row('Discount', -totals.discountAmt, { color: '#c62828' })}
+                    {totals.taxAmount > 0 && row('Tax', totals.taxAmount, { color: '#888' })}
+                    {row('Grand Total', totals.grandTotal, { bold: true, border: true, color: '#2e7d32' })}
+                  </div>
+                </div>
+
+                <div style={{ padding: 20, background: margin >= 30 ? '#E8F5E9' : margin >= 15 ? '#FFFDE7' : '#FFEBEE', borderRadius: 10, border: `2px solid ${margin >= 30 ? '#66BB6A' : margin >= 15 ? '#FFF176' : '#EF5350'}`, textAlign: 'center' }}>
+                  <div style={{ fontSize: '0.9rem', color: '#555', marginBottom: 4 }}>Estimated Margin</div>
+                  <div style={{ fontSize: '2.5rem', fontWeight: 800, color: margin >= 30 ? '#2e7d32' : margin >= 15 ? '#F57F17' : '#c62828' }}>{margin}%</div>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: 24, marginTop: 8 }}>
+                    <div><div style={{ fontSize: '0.75rem', color: '#888' }}>Markup Profit</div><div style={{ fontWeight: 700, color: '#2e7d32' }}>{formatCurrency(totalMarkupProfit)}</div></div>
+                    <div><div style={{ fontSize: '0.75rem', color: '#888' }}>Labor Revenue</div><div style={{ fontWeight: 700, color: '#1565c0' }}>{formatCurrency(totalLaborInHouse + totalServicesCost)}</div></div>
+                    <div><div style={{ fontSize: '0.75rem', color: '#888' }}>Gross Profit</div><div style={{ fontWeight: 700, color: grossProfit >= 0 ? '#2e7d32' : '#c62828' }}>{formatCurrency(grossProfit)}</div></div>
+                  </div>
+                </div>
+
+                {allParts.length > 0 && (
+                  <div style={{ marginTop: 24 }}>
+                    <h4 style={{ marginBottom: 12, fontSize: '0.95rem' }}>Per-Part Breakdown</h4>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                        <thead>
+                          <tr style={{ background: '#f5f5f5' }}>
+                            <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '2px solid #ddd' }}>#</th>
+                            <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '2px solid #ddd' }}>Part</th>
+                            <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Qty</th>
+                            <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Material</th>
+                            <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Labor</th>
+                            <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Outside</th>
+                            <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd', fontWeight: 700 }}>Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {allParts.sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0)).map(p => {
+                            const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+                            const qty = parseInt(p.quantity) || 1;
+                            const mat = parseFloat(p.materialTotal) || 0;
+                            const matMk = parseFloat(p.materialMarkupPercent) || 0;
+                            const matBilled = Math.round(mat * (1 + matMk / 100) * 100) / 100;
+                            const labor = parseFloat(p.laborTotal) || 0;
+                            const opCost = parseFloat(p.outsideProcessingCost) || 0;
+                            const opMk = parseFloat(p.outsideProcessingMarkupPercent) || 0;
+                            const opBilled = Math.round(opCost * (1 + opMk / 100) * 100) / 100;
+                            const total = parseFloat(p.partTotal) || 0;
+                            const desc = fd._materialDescription || p.materialDescription || PART_TYPES[p.partType]?.label || p.partType;
+                            return (
+                              <tr key={p.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                                <td style={{ padding: '8px 12px', fontWeight: 600 }}>{p.partNumber}</td>
+                                <td style={{ padding: '8px 12px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</td>
+                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{qty}</td>
+                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{matBilled > 0 ? formatCurrency(matBilled * qty) : '—'}</td>
+                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{labor > 0 ? formatCurrency(labor * qty) : '—'}</td>
+                                <td style={{ padding: '8px 12px', textAlign: 'right' }}>{opBilled > 0 ? formatCurrency(opBilled * qty) : '—'}</td>
+                                <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700 }}>{formatCurrency(total)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* Part Type Picker Modal */}
       {showPartTypePicker && (
@@ -3614,6 +4120,145 @@ function WorkOrderDetailsPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* COD Payment Confirmation Dialog */}
+      {codConfirmOpen && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={() => { setCodConfirmOpen(false); setCodShowOverride(false); }}>
+          <div style={{ background: 'white', borderRadius: 12, padding: 0, maxWidth: 440, width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ background: '#c62828', color: 'white', padding: '16px 24px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}>
+              <div style={{ fontSize: '2rem', marginBottom: 4 }}>💰</div>
+              <div style={{ fontSize: '1.2rem', fontWeight: 900, letterSpacing: 1 }}>COD — PAYMENT REQUIRED</div>
+              <div style={{ fontSize: '0.85rem', opacity: 0.9, marginTop: 4 }}>{order?.clientName}</div>
+            </div>
+
+            <div style={{ padding: '24px' }}>
+              <p style={{ fontSize: '1rem', fontWeight: 600, marginBottom: 16, textAlign: 'center', color: '#333' }}>
+                Has this job been paid for?
+              </p>
+
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                <button className="btn" onClick={() => {
+                  setCodConfirmOpen(false);
+                  setCodShowOverride(false);
+                  setPaymentForm({ date: new Date().toISOString().split('T')[0], method: '', reference: '' });
+                  setPaymentDialogOpen(true);
+                }} style={{ flex: 1, background: '#388E3C', color: 'white', border: 'none', padding: '14px', fontSize: '1rem', fontWeight: 700, borderRadius: 8 }}>
+                  ✅ Yes — Record Payment
+                </button>
+                <button className="btn" onClick={() => {
+                  setCodShowOverride(true);
+                }} style={{ flex: 1, background: '#c62828', color: 'white', border: 'none', padding: '14px', fontSize: '1rem', fontWeight: 700, borderRadius: 8 }}>
+                  ❌ No — Not Paid
+                </button>
+              </div>
+
+              {codShowOverride && (
+                <div style={{ background: '#FFF3E0', border: '1px solid #FFB74D', borderRadius: 8, padding: 16, marginTop: 8 }}>
+                  <p style={{ fontSize: '0.85rem', fontWeight: 600, color: '#E65100', marginBottom: 8 }}>
+                    ⚠️ This order has NOT been paid. Enter override password to proceed anyway:
+                  </p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input type="password" className="form-input" placeholder="Override password" style={{ flex: 1 }}
+                      value={codOverrideInput} onChange={e => setCodOverrideInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && codOverrideInput) {
+                          if (codOverridePassword && codOverrideInput === codOverridePassword) {
+                            setCodConfirmOpen(false); setCodShowOverride(false);
+                            if (codAction === 'checklist') printPickupChecklist();
+                            else if (codAction === 'pickup') setShowPickupModal(true);
+                          } else { setError('Incorrect override password'); }
+                        }
+                      }} />
+                    <button className="btn" onClick={() => {
+                      if (codOverridePassword && codOverrideInput === codOverridePassword) {
+                        setCodConfirmOpen(false); setCodShowOverride(false);
+                        if (codAction === 'checklist') printPickupChecklist();
+                        else if (codAction === 'pickup') setShowPickupModal(true);
+                      } else { setError('Incorrect override password'); }
+                    }} style={{ background: '#E65100', color: 'white', border: 'none', fontWeight: 600 }}>
+                      Override
+                    </button>
+                  </div>
+                  {!codOverridePassword && (
+                    <p style={{ fontSize: '0.75rem', color: '#c62828', marginTop: 8 }}>
+                      No override password set. Go to Admin → Users & Logs → System to configure one.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <button onClick={() => { setCodConfirmOpen(false); setCodShowOverride(false); }} 
+                style={{ width: '100%', marginTop: 12, padding: '10px', background: 'none', border: '1px solid #ccc', borderRadius: 8, cursor: 'pointer', color: '#666', fontSize: '0.9rem' }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Recording Dialog */}
+      {paymentDialogOpen && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={() => { setPaymentDialogOpen(false); setCodAction(null); }}>
+          <div style={{ background: 'white', borderRadius: 12, padding: 0, maxWidth: 460, width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ background: '#388E3C', color: 'white', padding: '16px 24px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}>
+              <div style={{ fontSize: '2rem', marginBottom: 4 }}>💳</div>
+              <div style={{ fontSize: '1.2rem', fontWeight: 900, letterSpacing: 1 }}>RECORD PAYMENT</div>
+              <div style={{ fontSize: '0.85rem', opacity: 0.9, marginTop: 4 }}>{order?.clientName} — {order?.drNumber ? 'DR-' + order.drNumber : order?.orderNumber}</div>
+            </div>
+
+            <div style={{ padding: '24px' }}>
+              <div className="form-group" style={{ marginBottom: 16 }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>Payment Date</label>
+                <input type="date" className="form-input" value={paymentForm.date}
+                  onChange={e => setPaymentForm({ ...paymentForm, date: e.target.value })} />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 16 }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>Payment Method *</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  {['Check', 'Cash', 'Wire Transfer', 'Credit Card', 'ACH', 'Zelle'].map(method => (
+                    <button key={method} onClick={() => setPaymentForm({ ...paymentForm, method })}
+                      style={{
+                        padding: '12px 8px', border: paymentForm.method === method ? '2px solid #388E3C' : '2px solid #ddd',
+                        background: paymentForm.method === method ? '#E8F5E9' : 'white', borderRadius: 8, cursor: 'pointer',
+                        fontWeight: paymentForm.method === method ? 700 : 400, fontSize: '0.9rem',
+                        color: paymentForm.method === method ? '#2E7D32' : '#333'
+                      }}>
+                      {method === 'Check' && '📝 '}{method === 'Cash' && '💵 '}{method === 'Wire Transfer' && '🏦 '}
+                      {method === 'Credit Card' && '💳 '}{method === 'ACH' && '🔄 '}{method === 'Zelle' && '⚡ '}
+                      {method}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 20 }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  {paymentForm.method === 'Check' ? 'Check Number' : paymentForm.method === 'Wire Transfer' ? 'Wire Reference' : paymentForm.method === 'ACH' ? 'ACH Transaction ID' : paymentForm.method === 'Credit Card' ? 'Last 4 Digits / Auth Code' : 'Transaction ID / Reference'}
+                </label>
+                <input type="text" className="form-input" 
+                  placeholder={paymentForm.method === 'Check' ? 'e.g. 4521' : paymentForm.method === 'Cash' ? 'Optional — receipt number' : 'e.g. TXN-12345'}
+                  value={paymentForm.reference} onChange={e => setPaymentForm({ ...paymentForm, reference: e.target.value })} />
+              </div>
+
+              <div style={{ display: 'flex', gap: 12 }}>
+                <button className="btn" onClick={handleRecordPayment} disabled={!paymentForm.method}
+                  style={{ flex: 1, background: paymentForm.method ? '#388E3C' : '#ccc', color: 'white', border: 'none', padding: '14px', fontSize: '1rem', fontWeight: 700, borderRadius: 8 }}>
+                  ✅ Confirm Payment
+                </button>
+                <button onClick={() => { setPaymentDialogOpen(false); setCodAction(null); }}
+                  style={{ padding: '14px 20px', background: 'none', border: '1px solid #ccc', borderRadius: 8, cursor: 'pointer', color: '#666', fontSize: '0.9rem' }}>
+                  Cancel
+                </button>
               </div>
             </div>
           </div>

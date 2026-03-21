@@ -8,6 +8,7 @@ import ShipmentDetailsPage from './pages/ShipmentDetailsPage';
 import NewShipmentPage from './pages/NewShipmentPage';
 import InboundPage from './pages/InboundPage';
 import InboundDetailsPage from './pages/InboundDetailsPage';
+import PendingOrdersPage from './pages/PendingOrdersPage';
 import WorkOrdersPage from './pages/WorkOrdersPage';
 import WorkOrderDetailsPage from './pages/WorkOrderDetailsPage';
 import EstimatesPage from './pages/EstimatesPage';
@@ -19,12 +20,14 @@ import AdminPage from './pages/AdminPage';
 import SchedulingPage from './pages/SchedulingPage';
 import DRNumbersPage from './pages/DRNumbersPage';
 import PONumbersPage from './pages/PONumbersPage';
+import InvoiceNumbersPage from './pages/InvoiceNumbersPage';
 import PurchaseOrdersPage from './pages/PurchaseOrdersPage';
 import EmailSettingsPage from './pages/EmailSettingsPage';
 import ClientsVendorsPage from './pages/ClientsVendorsPage';
 import AutoCADToolsPage from './pages/AutoCADToolsPage';
 import ShipmentsAdminPage from './pages/ShipmentsAdminPage';
 import ShopSuppliesPage from './pages/ShopSuppliesPage';
+import InvoiceCenterPage from './pages/InvoiceCenterPage';
 import SectionSizesPage from './pages/SectionSizesPage';
 import './App.css';
 
@@ -121,6 +124,12 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
       
+      <Route path="/pending-orders" element={
+        <ProtectedRoute>
+          <Layout><PendingOrdersPage /></Layout>
+        </ProtectedRoute>
+      } />
+      
       <Route path="/estimates" element={
         <ProtectedRoute>
           <Layout><EstimatesPage /></Layout>
@@ -148,6 +157,12 @@ function AppRoutes() {
       <Route path="/shop-supplies" element={
         <ProtectedRoute>
           <Layout><ShopSuppliesPage /></Layout>
+        </ProtectedRoute>
+      } />
+      
+      <Route path="/invoicing" element={
+        <ProtectedRoute>
+          <Layout><InvoiceCenterPage /></Layout>
         </ProtectedRoute>
       } />
       
@@ -190,6 +205,12 @@ function AppRoutes() {
       <Route path="/admin/po-numbers" element={
         <AdminRoute>
           <Layout><PONumbersPage /></Layout>
+        </AdminRoute>
+      } />
+      
+      <Route path="/admin/invoice-numbers" element={
+        <AdminRoute>
+          <Layout><InvoiceNumbersPage /></Layout>
         </AdminRoute>
       } />
       

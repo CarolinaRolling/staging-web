@@ -126,7 +126,7 @@ function BackupPage() {
     if (!bgEmail.trim()) { setError('Please enter an email address'); return; }
     try {
       setBgBackupStarted(true);
-      const res = await runBackgroundBackup({ includeFiles: true, email: bgEmail.trim() });
+      const res = await runBackgroundBackup({ includeFiles: false, email: bgEmail.trim() });
       setSuccess(res.data.message || 'Backup started — check your email when complete');
     } catch (err) {
       setError('Failed to start background backup');
@@ -222,11 +222,11 @@ function BackupPage() {
               <input type="checkbox" checked={backupOptions.includeFiles}
                 onChange={(e) => setBackupOptions({ ...backupOptions, includeFiles: e.target.checked })} />
               <div>
-                <strong>📎 Include PDFs & CAD Files</strong>
+                <strong>📎 Include PDFs & CAD Files (Manual Download Only)</strong>
                 <div style={{ fontSize: '0.8rem', color: '#666' }}>
-                  Downloads all PDFs, STEP, DXF, and DWG files from Cloudinary into the backup.
-                  This makes the backup much larger but ensures full disaster recovery.
-                  {backupOptions.includeFiles && <span style={{ color: '#e65100', fontWeight: 600 }}> — This may take several minutes.</span>}
+                  Downloads all PDFs, STEP, DXF, and DWG files from Cloudinary into the backup JSON.
+                  This creates a large file (50-100MB+) saved to your computer for disaster recovery.
+                  {backupOptions.includeFiles && <span style={{ color: '#e65100', fontWeight: 600 }}> — This may take a few minutes.</span>}
                 </div>
               </div>
             </label>
@@ -289,7 +289,7 @@ function BackupPage() {
                       {uploadedBackup.counts.estimates > 0 && <li>{uploadedBackup.counts.estimates} estimates</li>}
                       {uploadedBackup.counts.inboundOrders > 0 && <li>{uploadedBackup.counts.inboundOrders} inbound orders</li>}
                       {uploadedBackup.counts.settings > 0 && <li>{uploadedBackup.counts.settings} settings</li>}
-                      {uploadedBackup.counts._files && <li style={{ color: '#1565c0', fontWeight: 600 }}>{uploadedBackup.counts._files.downloaded} PDF/CAD files included</li>}
+                      {uploadedBackup.counts._files && <li style={{ color: '#1565c0', fontWeight: 600 }}>{uploadedBackup.counts._files.downloaded} PDF/CAD files included{uploadedBackup.counts._files.failed > 0 && <span style={{ color: '#c62828' }}> ({uploadedBackup.counts._files.failed} failed)</span>}</li>}
                       {uploadedBackup.files && Object.keys(uploadedBackup.files).length > 0 && !uploadedBackup.counts._files && <li style={{ color: '#1565c0', fontWeight: 600 }}>{Object.keys(uploadedBackup.files).length} PDF/CAD files included</li>}
                     </ul>
                   </div>
@@ -324,7 +324,19 @@ function BackupPage() {
 
       {/* Data Summary */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 className="card-title" style={{ marginBottom: 16 }}>Current Data Summary</h3>
+        <h3 className="card-title" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+          Current Data Summary
+          {backupInfo?.storageProvider && (
+            <span style={{
+              fontSize: '0.7rem', fontWeight: 600, padding: '3px 10px', borderRadius: 12,
+              background: backupInfo.storageProvider === 's3' ? '#e8f5e9' : '#fff3e0',
+              color: backupInfo.storageProvider === 's3' ? '#2e7d32' : '#e65100',
+              border: `1px solid ${backupInfo.storageProvider === 's3' ? '#a5d6a7' : '#ffcc80'}`
+            }}>
+              {backupInfo.storageProvider === 's3' ? '☁️ Amazon S3' : '📦 Cloudinary'}
+            </span>
+          )}
+        </h3>
         <div className="grid grid-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
           <div style={{ textAlign: 'center', padding: 16, background: '#f5f5f5', borderRadius: 8 }}>
             <Package size={32} color="#1976d2" />
@@ -356,14 +368,14 @@ function BackupPage() {
           Scheduled Auto-Backup
         </h3>
         <p style={{ fontSize: '0.9rem', color: '#333', marginBottom: 8 }}>
-          Full backups (including PDFs & CAD files) run automatically <strong>every Friday at midnight Pacific</strong> and are stored on Cloudinary.
+          Database backups run automatically <strong>every Friday at midnight Pacific</strong> and are stored on Cloudinary. For a full backup with PDFs & CAD files, use the manual download above with "Include Files" checked.
         </p>
         
         {/* Run Now */}
         <div style={{ background: 'white', borderRadius: 8, padding: 16, border: '1px solid #e0e0e0', marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>Run Backup Now</div>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>Run Cloud Backup Now</div>
           <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: 10 }}>
-            Start a full backup with all PDFs & CAD files in the background. You'll get an email when it's done.
+            Upload a database backup to Cloudinary now (same as the Friday auto-backup). You'll get an email when it's done.
           </p>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <input type="email" className="form-input" placeholder="Email for notification"
@@ -371,7 +383,7 @@ function BackupPage() {
               style={{ flex: 1, minWidth: 200, maxWidth: 300 }} />
             <button className="btn btn-primary" onClick={handleBackgroundBackup}
               disabled={bgBackupStarted} style={{ whiteSpace: 'nowrap' }}>
-              {bgBackupStarted ? '✅ Backup Running...' : '🚀 Run Backup Now'}
+              {bgBackupStarted ? '✅ Backup Running...' : '🚀 Run Cloud Backup Now'}
             </button>
           </div>
           {bgBackupStarted && (

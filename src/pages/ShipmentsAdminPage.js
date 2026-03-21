@@ -191,10 +191,7 @@ function ShipmentsAdminPage() {
     <div>
       <div className="page-header">
         <div>
-          <button className="btn btn-outline" onClick={() => navigate('/admin')} style={{ marginBottom: 8 }}>
-            <ArrowLeft size={16} /> Back to Admin
-          </button>
-          <h1 style={{ margin: 0 }}>📦 Shipments Admin</h1>
+          <h1 style={{ margin: 0 }}>📦 Shipments</h1>
           <p style={{ color: '#666', margin: '4px 0 0' }}>
             {shipments.length} shipments total
             {unlinkedCount > 0 && (
@@ -204,6 +201,9 @@ function ShipmentsAdminPage() {
             )}
           </p>
         </div>
+        <button className="btn btn-primary" onClick={() => navigate('/new-shipment')} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Package size={18} /> + Receive Shipment
+        </button>
       </div>
 
       {/* Message */}

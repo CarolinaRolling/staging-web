@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Search, DollarSign, Send, Check, X, Archive, Trash2 } from 'lucide-react';
-import { getEstimates, deleteEstimate, convertEstimateToWorkOrder, createEstimate, searchClients } from '../services/api';
+import { getEstimates, deleteEstimate, restoreEstimate, permanentDeleteEstimate, getEstimateTrash, convertEstimateToWorkOrder, createEstimate, searchClients } from '../services/api';
 
 function EstimatesPage() {
   const navigate = useNavigate();
@@ -14,6 +14,8 @@ function EstimatesPage() {
   const [searching, setSearching] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
   const [showArchived, setShowArchived] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
+  const [trashEstimates, setTrashEstimates] = useState([]);
   const [showConvertModal, setShowConvertModal] = useState(null);
   const [convertData, setConvertData] = useState({ clientPurchaseOrderNumber: '', promisedDate: '' });
   const [converting, setConverting] = useState(false);
@@ -196,15 +198,100 @@ function EstimatesPage() {
 
       {/* Tabs */}
       <div className="tabs">
-        <button className={`tab ${!showArchived ? 'active' : ''}`} onClick={() => { setShowArchived(false); setStatusFilter('all'); }}>
+        <button className={`tab ${!showArchived && !showTrash ? 'active' : ''}`} onClick={() => { setShowArchived(false); setShowTrash(false); setStatusFilter('all'); }}>
           Active
         </button>
-        <button className={`tab ${showArchived ? 'active' : ''}`} onClick={() => { setShowArchived(true); setStatusFilter('all'); }}>
+        <button className={`tab ${showArchived ? 'active' : ''}`} onClick={() => { setShowArchived(true); setShowTrash(false); setStatusFilter('all'); }}>
           <Archive size={14} style={{ marginRight: 4 }} />
           Archived
         </button>
+        <button className={`tab ${showTrash ? 'active' : ''}`} onClick={async () => {
+          setShowTrash(true); setShowArchived(false);
+          try {
+            const res = await getEstimateTrash();
+            setTrashEstimates(res.data.data || []);
+          } catch { setTrashEstimates([]); }
+        }}>
+          <Trash2 size={14} style={{ marginRight: 4 }} />
+          Trash
+        </button>
       </div>
 
+      {/* Trash Tab Content */}
+      {showTrash ? (
+        <div>
+          <div style={{ padding: 12, background: '#ffebee', borderRadius: 8, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Trash2 size={18} color="#c62828" />
+            <span style={{ fontWeight: 600, color: '#c62828' }}>Trash</span>
+            <span style={{ color: '#888', fontSize: '0.85rem' }}>— estimates are permanently deleted after 30 days</span>
+          </div>
+          {trashEstimates.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
+              <Trash2 size={40} style={{ opacity: 0.3, marginBottom: 12 }} />
+              <div>Trash is empty</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {trashEstimates.map(est => {
+                const daysLeft = Math.max(0, 30 - Math.floor((Date.now() - new Date(est.trashedAt).getTime()) / (1000 * 60 * 60 * 24)));
+                return (
+                  <div key={est.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', background: '#fafafa', borderRadius: 8, border: '1px dashed #e0e0e0' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>
+                        {est.estimateNumber} — {est.clientName}
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#888' }}>
+                        Trashed {new Date(est.trashedAt).toLocaleDateString()} by {est.trashedBy || 'admin'}
+                        <span style={{ marginLeft: 8, color: daysLeft <= 7 ? '#c62828' : '#888' }}>
+                          ({daysLeft} days until permanent deletion)
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#555', marginTop: 2 }}>
+                        {est.parts?.length || 0} parts • {est.projectDescription ? est.projectDescription.substring(0, 80) : ''}
+                      </div>
+                    </div>
+                    <button onClick={async () => {
+                      try {
+                        await restoreEstimate(est.id);
+                        setTrashEstimates(prev => prev.filter(e => e.id !== est.id));
+                        setMessage(`${est.estimateNumber} restored`);
+                        setTimeout(() => setMessage(null), 3000);
+                      } catch { setError('Failed to restore'); }
+                    }} style={{ background: '#e8f5e9', border: '1px solid #66bb6a', color: '#2e7d32', padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>
+                      ↩️ Restore
+                    </button>
+                    <button onClick={async () => {
+                      if (!window.confirm(`Permanently delete ${est.estimateNumber}? This cannot be undone.`)) return;
+                      try {
+                        await permanentDeleteEstimate(est.id);
+                        setTrashEstimates(prev => prev.filter(e => e.id !== est.id));
+                        setMessage(`${est.estimateNumber} permanently deleted`);
+                        setTimeout(() => setMessage(null), 3000);
+                      } catch { setError('Failed to delete'); }
+                    }} style={{ background: 'none', border: '1px solid #c62828', color: '#c62828', padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>
+                      🗑️ Delete Forever
+                    </button>
+                  </div>
+                );
+              })}
+              {trashEstimates.length > 0 && (
+                <button onClick={async () => {
+                  if (!window.confirm(`Permanently delete ALL ${trashEstimates.length} trashed estimates? This cannot be undone.`)) return;
+                  try {
+                    for (const est of trashEstimates) { await permanentDeleteEstimate(est.id); }
+                    setTrashEstimates([]);
+                    setMessage('Trash emptied');
+                    setTimeout(() => setMessage(null), 3000);
+                  } catch { setError('Failed to empty trash'); }
+                }} style={{ alignSelf: 'flex-end', background: '#c62828', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>
+                  🗑️ Empty Trash ({trashEstimates.length})
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+      <>
       {/* Filters */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -227,15 +314,19 @@ function EstimatesPage() {
           )}
           {!showArchived && (
             <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>
-              {['all', 'draft', 'sent', 'declined'].map(status => (
+              {['all', 'draft', 'sent', 'declined'].map(status => {
+                const count = status === 'all' ? estimates.length : estimates.filter(e => e.status === status).length;
+                return (
                 <button
                   key={status}
                   className={`tab ${statusFilter === status ? 'active' : ''}`}
                   onClick={() => setStatusFilter(status)}
                 >
                   {status.charAt(0).toUpperCase() + status.slice(1)}
+                  {status !== 'all' && count > 0 && <span style={{ marginLeft: 4, fontSize: '0.75rem', opacity: 0.7 }}>({count})</span>}
                 </button>
-              ))}
+                );
+              })}
             </div>
           )}
           {showArchived && (
@@ -377,6 +468,8 @@ function EstimatesPage() {
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
 
       {/* New Estimate Modal */}

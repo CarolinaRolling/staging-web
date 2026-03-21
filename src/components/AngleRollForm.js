@@ -175,23 +175,38 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
     }
   }, [completeRings, clDiameter, lengthInches, tangentLength, ringsNeeded]);
 
-  // Auto-update quantity when complete rings changes
+  // Auto-update quantity and pricing when complete rings changes
   useEffect(() => {
     if (completeRings && ringCalc && !ringCalc.error) {
+      const numRings = parseInt(ringsNeeded) || 1;
+      const matPerLength = parseFloat(partData._ringMaterialPerLength) || 0;
+      const laborPerUnit = parseFloat(partData._ringLaborPerUnit) || 0;
+      
+      // Material per ring = (cost per length × lengths needed) / rings
+      const totalMat = matPerLength * ringCalc.sticksNeeded;
+      const matPerRing = numRings > 0 ? totalMat / numRings : 0;
+      
+      // Labor per ring: if multi-segment, labor is per length; if single, labor is per ring
+      const totalLabor = ringCalc.multiSegment ? laborPerUnit * ringCalc.sticksNeeded : laborPerUnit * numRings;
+      const laborPerRing = numRings > 0 ? totalLabor / numRings : 0;
+
       setPartData(prev => ({
         ...prev,
-        quantity: String(parseInt(ringsNeeded) || 1),
+        quantity: String(numRings),
         _completeRings: true,
         _ringsNeeded: ringsNeeded,
         _tangentLength: tangentLength,
         _ringSticksNeeded: ringCalc.sticksNeeded,
         _ringRingsPerStick: ringCalc.ringsPerStick || 0,
         _ringMultiSegment: ringCalc.multiSegment || false,
+        // Auto-set pricing: per-ring values that the pricing system uses
+        materialTotal: matPerRing > 0 ? matPerRing.toFixed(2) : prev.materialTotal,
+        laborTotal: laborPerRing > 0 ? laborPerRing.toFixed(2) : prev.laborTotal,
       }));
     } else {
       setPartData(prev => ({ ...prev, _completeRings: false }));
     }
-  }, [completeRings, ringCalc, ringsNeeded, tangentLength]);
+  }, [completeRings, ringCalc, ringsNeeded, tangentLength, partData._ringMaterialPerLength, partData._ringLaborPerUnit]);
 
   // Build material description string
   const materialDescription = useMemo(() => {
@@ -541,6 +556,109 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
                 );
               })}
             </div>
+            <button type="button" onClick={() => {
+                const dir = partData.rollType === 'easy_way' ? 'Easy Way' : 'Hard Way';
+                const mp = rollMeasurePoint === 'outside' ? 'OD' : 'ID';
+                const size = partData._angleSize || partData.sectionSize || '';
+                const rollVal = rollValue || '';
+                const img1 = partData.rollType === 'easy_way' ? 'EWODOp1.png' : 'HWIDOp1.png';
+                const img2 = partData.rollType === 'easy_way' ? 'EWODOp2.png' : 'HWIDOp2.png';
+                const w = window.open('', '_blank', 'width=700,height=900');
+                w.document.write(`<!DOCTYPE html><html><head><title>Orientation Confirmation</title>
+<style>
+  @page { size: letter; margin: 0.6in; }
+  body { font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; color: #333; padding: 20px 0; }
+  .company-header { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  .company-logo { width: 60px; height: 60px; border-radius: 50%; object-fit: cover; }
+  .company-info { flex: 1; }
+  .company-name { font-size: 16px; font-weight: 700; color: #333; }
+  .company-contact { font-size: 8.5px; color: #888; margin-top: 3px; line-height: 1.6; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+  .doc-title { font-size: 18px; font-weight: 700; color: #1976d2; }
+  .doc-date { font-size: 11px; color: #888; text-align: right; }
+  .divider { border: none; border-top: 1px solid #ccc; margin: 8px 0; }
+  .specs { display: flex; gap: 24px; padding: 10px 0; font-size: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .specs .item label { display: block; font-size: 9px; text-transform: uppercase; color: #999; letter-spacing: 0.5px; font-weight: 600; }
+  .specs .item span { font-weight: 600; color: #333; }
+  .instruction { text-align: center; font-size: 13px; font-weight: 600; color: #333; margin: 16px 0 20px; }
+  .options { display: flex; gap: 24px; justify-content: center; }
+  .option-card { flex: 1; max-width: 280px; border: 3px solid #ccc; border-radius: 12px; overflow: hidden; text-align: center; }
+  .option-card img { width: 100%; display: block; }
+  .option-label { padding: 12px; font-size: 16px; font-weight: 700; color: #333; background: #f5f5f5; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .checkbox { width: 24px; height: 24px; border: 3px solid #333; border-radius: 4px; display: inline-block; }
+  .confirm { margin-top: 36px; border-top: 2px solid #ccc; padding-top: 16px; }
+  .sig-row { display: flex; gap: 30px; margin-top: 20px; }
+  .sig-block { flex: 1; }
+  .sig-line { border-bottom: 1px solid #333; height: 28px; margin-bottom: 4px; }
+  .sig-label { font-size: 10px; color: #888; }
+  .footer { margin-top: 30px; text-align: center; font-size: 8px; color: #aaa; border-top: 1px solid #eee; padding-top: 8px; }
+  @media print { button { display: none; } }
+</style></head><body>
+
+<div class="company-header">
+  <img src="/logo.png" class="company-logo" onerror="this.style.display='none'" />
+  <div class="company-info">
+    <div class="company-name">Carolina Rolling Co. Inc.</div>
+    <div class="company-contact">
+      9152 Sonrisa St., Bellflower, CA 90706<br/>
+      Phone: (562) 633-1044 &nbsp;|&nbsp; Email: keepitrolling@carolinarolling.com
+    </div>
+  </div>
+</div>
+<hr class="divider" />
+
+<div class="doc-header">
+  <div class="doc-title">ROLL ORIENTATION CONFIRMATION</div>
+  <div class="doc-date">${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</div>
+</div>
+<hr class="divider" />
+
+<div class="specs">
+  <div class="item"><label>Section</label><span>${size}</span></div>
+  <div class="item"><label>Roll Direction</label><span>${dir} (${mp})</span></div>
+  <div class="item"><label>Diameter/Radius</label><span>${rollVal}"</span></div>
+</div>
+
+<div class="instruction">Please select the correct orientation by checking one option below:</div>
+<div class="options">
+  <div class="option-card">
+    <img src="/images/angle-orientation/${img1}" alt="Option 1" />
+    <div class="option-label"><div class="checkbox"></div> Option 1</div>
+  </div>
+  <div class="option-card">
+    <img src="/images/angle-orientation/${img2}" alt="Option 2" />
+    <div class="option-label"><div class="checkbox"></div> Option 2</div>
+  </div>
+</div>
+<div class="confirm">
+  <p style="font-size:12px;color:#666;text-align:center;">Please check the correct orientation above, sign below, and return to Carolina Rolling before we proceed.</p>
+  <div class="sig-row">
+    <div class="sig-block">
+      <div class="sig-line"></div>
+      <div class="sig-label">Client Name (Print)</div>
+    </div>
+    <div class="sig-block">
+      <div class="sig-line"></div>
+      <div class="sig-label">Signature</div>
+    </div>
+    <div class="sig-block">
+      <div class="sig-line"></div>
+      <div class="sig-label">Date</div>
+    </div>
+  </div>
+</div>
+<div class="footer">Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com</div>
+<script>setTimeout(function(){window.print();},500);</script>
+</body></html>`);
+                w.document.close();
+              }}
+              style={{
+                marginTop: 10, padding: '8px 16px', borderRadius: 6, cursor: 'pointer',
+                background: '#1976d2', color: 'white', border: 'none', fontWeight: 600,
+                fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 6
+              }}>
+                📄 Print Orientation PDF for Client
+              </button>
           </div>
         )}
 
@@ -632,7 +750,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
             <div style={{ marginTop: 12 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                 <div className="form-group" style={{ margin: 0 }}>
-                  <label className="form-label">Rings Needed</label>
+                  <label className="form-label">Rings Needed (Qty)</label>
                   <input type="number" min="1" className="form-input" value={ringsNeeded}
                     onFocus={(e) => e.target.select()} onChange={(e) => setRingsNeeded(parseInt(e.target.value) || 1)} />
                 </div>
@@ -646,7 +764,7 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
 
               {ringCalc && !ringCalc.error && (
                 <div style={{ background: '#c8e6c9', borderRadius: 8, padding: 12, fontSize: '0.85rem' }}>
-                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 8 }}>⭕ Ring Calculation</div>
+                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 8 }}>⭕ Ring Nesting Calculation</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
                     <div>
                       <div style={{ color: '#666', fontSize: '0.7rem' }}>CL Circumference</div>
@@ -654,22 +772,78 @@ export default function AngleRollForm({ partData, setPartData, vendorSuggestions
                     </div>
                     <div>
                       <div style={{ color: '#666', fontSize: '0.7rem' }}>Usable Length</div>
-                      <div style={{ fontWeight: 600 }}>{ringCalc.usable.toFixed(2)}" <span style={{ color: '#999', fontSize: '0.75rem' }}>({lengthInches}" - {ringCalc.tangent * 2}" tang)</span></div>
+                      <div style={{ fontWeight: 600 }}>{ringCalc.usable.toFixed(2)}"</div>
                     </div>
                     <div>
-                      <div style={{ color: '#666', fontSize: '0.7rem' }}>{ringCalc.multiSegment ? 'Segments/Ring' : 'Rings/Stick'}</div>
+                      <div style={{ color: '#666', fontSize: '0.7rem' }}>{ringCalc.multiSegment ? 'Lengths/Ring' : 'Rings/Length'}</div>
                       <div style={{ fontWeight: 600, fontSize: '1.1rem', color: '#1565c0' }}>{ringCalc.multiSegment ? ringCalc.segmentsPerRing : ringCalc.ringsPerStick}</div>
                     </div>
                   </div>
                   <div style={{ marginTop: 10, padding: '8px 0', borderTop: '1px solid #a5d6a7', display: 'flex', justifyContent: 'space-between', fontSize: '1rem' }}>
-                    <span><strong>{ringsNeeded}</strong> ring(s) needed</span>
-                    <strong style={{ color: '#2e7d32', fontSize: '1.1rem' }}>= {ringCalc.sticksNeeded} stick(s) to order</strong>
+                    <span><strong>{ringsNeeded}</strong> ring(s) ordered</span>
+                    <strong style={{ color: '#2e7d32', fontSize: '1.1rem' }}>= {ringCalc.sticksNeeded} length(s) needed</strong>
                   </div>
-                  {!ringCalc.multiSegment && ringCalc.ringsPerStick > 1 && (
-                    <div style={{ marginTop: 6, fontSize: '0.8rem', color: '#1565c0', fontStyle: 'italic' }}>
-                      💡 Material cost per ring = stick price ÷ {ringCalc.ringsPerStick}
+
+                  {/* Ring Pricing */}
+                  <div style={{ marginTop: 12, padding: 12, background: '#fff', borderRadius: 8, border: '1px solid #a5d6a7' }}>
+                    <div style={{ fontWeight: 600, color: '#1565c0', marginBottom: 10, fontSize: '0.9rem' }}>💰 Ring Pricing</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Material Cost Per Length</label>
+                        <div style={{ position: 'relative' }}>
+                          <input type="number" step="any" className="form-input" style={{ paddingLeft: 20 }}
+                            value={partData._ringMaterialPerLength || ''}
+                            onFocus={(e) => e.target.select()}
+                            onChange={(e) => setPartData(prev => ({ ...prev, _ringMaterialPerLength: e.target.value }))} 
+                            placeholder="0.00" />
+                          <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: '#666', fontWeight: 600 }}>$</span>
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: '#888', marginTop: 2 }}>
+                          {ringCalc.sticksNeeded} length(s) × ${parseFloat(partData._ringMaterialPerLength) || 0} = <strong>${((parseFloat(partData._ringMaterialPerLength) || 0) * ringCalc.sticksNeeded).toFixed(2)}</strong> total material
+                        </div>
+                      </div>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">{ringCalc.multiSegment ? 'Labor Per Length (rolled)' : 'Labor Per Ring'}</label>
+                        <div style={{ position: 'relative' }}>
+                          <input type="number" step="any" className="form-input" style={{ paddingLeft: 20 }}
+                            value={partData._ringLaborPerUnit || ''}
+                            onFocus={(e) => e.target.select()}
+                            onChange={(e) => setPartData(prev => ({ ...prev, _ringLaborPerUnit: e.target.value }))}
+                            placeholder="0.00" />
+                          <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: '#666', fontWeight: 600 }}>$</span>
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: '#888', marginTop: 2 }}>
+                          {ringCalc.multiSegment 
+                            ? <>{ringCalc.sticksNeeded} length(s) × ${parseFloat(partData._ringLaborPerUnit) || 0} = <strong>${((parseFloat(partData._ringLaborPerUnit) || 0) * ringCalc.sticksNeeded).toFixed(2)}</strong> total labor</>
+                            : <>{ringsNeeded} ring(s) × ${parseFloat(partData._ringLaborPerUnit) || 0} = <strong>${((parseFloat(partData._ringLaborPerUnit) || 0) * (parseInt(ringsNeeded) || 1)).toFixed(2)}</strong> total labor</>
+                          }
+                        </div>
+                      </div>
                     </div>
-                  )}
+                    {/* Summary */}
+                    {(parseFloat(partData._ringMaterialPerLength) > 0 || parseFloat(partData._ringLaborPerUnit) > 0) && (() => {
+                      const matPerLength = parseFloat(partData._ringMaterialPerLength) || 0;
+                      const laborPerUnit = parseFloat(partData._ringLaborPerUnit) || 0;
+                      const numRings = parseInt(ringsNeeded) || 1;
+                      const totalMat = matPerLength * ringCalc.sticksNeeded;
+                      const totalLabor = ringCalc.multiSegment ? laborPerUnit * ringCalc.sticksNeeded : laborPerUnit * numRings;
+                      const matPerRing = totalMat / numRings;
+                      const laborPerRing = totalLabor / numRings;
+                      return (
+                        <div style={{ marginTop: 10, padding: '8px 10px', background: '#e3f2fd', borderRadius: 6, fontSize: '0.85rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span>Material per ring:</span><strong>${matPerRing.toFixed(2)}</strong>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span>Labor per ring:</span><strong>${laborPerRing.toFixed(2)}</strong>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #90caf9', paddingTop: 6, marginTop: 6, fontWeight: 700, color: '#1565c0' }}>
+                            <span>Total ({numRings} rings):</span><span>${(totalMat + totalLabor).toFixed(2)}</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
                 </div>
               )}
               {ringCalc && ringCalc.error && (

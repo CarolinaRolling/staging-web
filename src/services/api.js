@@ -190,9 +190,14 @@ export const getEstimateById = (id) => api.get(`/estimates/${id}`);
 export const createEstimate = (data) => api.post('/estimates', data);
 export const updateEstimate = (id, data) => api.put(`/estimates/${id}`, data);
 export const deleteEstimate = (id) => api.delete(`/estimates/${id}`);
+export const restoreEstimate = (id) => api.post(`/estimates/${id}/restore`);
+export const permanentDeleteEstimate = (id) => api.delete(`/estimates/${id}/permanent`);
+export const getEstimateTrash = () => api.get('/estimates/trash');
 
 // Estimate Parts
 export const addEstimatePart = (estimateId, data) => api.post(`/estimates/${estimateId}/parts`, data);
+export const generateOutsideProcessingPO = (estimateId, partId, notes) => api.post(`/estimates/${estimateId}/parts/${partId}/outside-processing-po`, { notes });
+export const emailOutsideProcessingPO = (estimateId, partId, contactEmail) => api.post(`/estimates/${estimateId}/parts/${partId}/outside-processing-email`, { contactEmail });
 export const updateEstimatePart = (estimateId, partId, data) => api.put(`/estimates/${estimateId}/parts/${partId}`, data);
 export const deleteEstimatePart = (estimateId, partId) => api.delete(`/estimates/${estimateId}/parts/${partId}`);
 
@@ -209,6 +214,15 @@ export const uploadEstimatePartFile = (estimateId, partId, fileOrFiles, fileType
   formData.append('fileType', fileType);
   return api.post(`/estimates/${estimateId}/parts/${partId}/files`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+export const aiParseDocument = (estimateId, file, additionalNotes = '') => {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (additionalNotes) formData.append('additionalNotes', additionalNotes);
+  return api.post(`/estimates/${estimateId}/ai-parse-document`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000 // 2 min for AI processing
   });
 };
 export const deleteEstimatePartFile = (estimateId, partId, fileId) => 
@@ -251,6 +265,8 @@ export const archiveOldEstimates = () => api.post('/estimates/archive-old');
 export const shipWorkOrder = (id, data) => api.post(`/workorders/${id}/ship`, data);
 export const archiveWorkOrder = (id) => api.post(`/workorders/${id}/archive`);
 export const recordPickup = (id, data) => api.post(`/workorders/${id}/pickup`, data);
+export const recordPayment = (id, data) => api.post(`/workorders/${id}/record-payment`, data);
+export const clearPayment = (id) => api.post(`/workorders/${id}/clear-payment`);
 export const getArchivedWorkOrders = (params) => api.get('/workorders/archived', { params });
 export const getRecentlyCompletedOrders = () => api.get('/workorders/recently-completed');
 export const duplicateWorkOrderToEstimate = (id) => api.post(`/workorders/${id}/duplicate-to-estimate`);
@@ -347,8 +363,9 @@ export default api;
 
 
 // QuickBooks IIF Export
-export const exportWorkOrderIIF = (id) => api.get(`/quickbooks/export/${id}`, { responseType: 'blob' });
-export const exportBatchIIF = (workOrderIds) => api.post('/quickbooks/export-batch', { workOrderIds }, { responseType: 'blob' });
+export const exportWorkOrderIIF = (id) => api.get(`/quickbooks/export/${id}`, { responseType: 'text', transformResponse: [(data) => data] });
+export const previewWorkOrderIIF = (id) => api.get(`/quickbooks/preview/${id}`);
+export const exportBatchIIF = (workOrderIds) => api.post('/quickbooks/export-batch', { workOrderIds }, { responseType: 'text', transformResponse: [(data) => data] });
 export const previewIIF = (id) => api.get(`/quickbooks/preview/${id}`);
 export const exportCustomersIIF = () => api.post('/quickbooks/export-customers', {}, { responseType: 'blob' });
 
@@ -368,3 +385,80 @@ export const uploadShopSupplyImage = (id, file) => {
   return api.post(`/shop-supplies/${id}/image`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
 };
 export const deleteShopSupplyImage = (id) => api.delete(`/shop-supplies/${id}/image`);
+export const getShopSupplyCategories = () => api.get('/shop-supplies/categories');
+export const updateShopSupplyCategories = (categories) => api.put('/shop-supplies/categories', { categories });
+
+// Email Scanner
+export const getEmailScannerStatus = () => api.get('/email-scanner/status');
+export const getEmailScannerAccounts = () => api.get('/email-scanner/accounts');
+export const startGmailOAuth = () => api.get('/email-scanner/oauth/start');
+export const disconnectGmailAccount = (id) => api.delete(`/email-scanner/accounts/${id}`);
+export const toggleGmailAccount = (id) => api.put(`/email-scanner/accounts/${id}/toggle`);
+export const triggerEmailScan = (hoursBack = 0) => api.post('/email-scanner/scan-now', hoursBack ? { hoursBack } : {});
+export const getEmailScanHistory = () => api.get('/email-scanner/history');
+export const getPendingOrders = (status) => api.get('/email-scanner/pending-orders', { params: { status } });
+export const approvePendingOrder = (id, data) => api.post(`/email-scanner/pending-orders/${id}/approve`, data);
+export const rejectPendingOrder = (id, data) => api.post(`/email-scanner/pending-orders/${id}/reject`, data);
+export const deletePendingOrder = (id) => api.delete(`/email-scanner/pending-orders/${id}`);
+export const linkPendingOrderEstimate = (id, estimateId) => api.put(`/email-scanner/pending-orders/${id}/link-estimate`, { estimateId });
+export const searchEstimatesForLink = (q) => api.get('/email-scanner/search-estimates', { params: { q } });
+export const replyWithPdf = (estimateId, message) => api.post(`/email-scanner/reply-with-pdf/${estimateId}`, { message });
+export const sendVendorRfq = (estimateId, data) => api.post(`/email-scanner/vendor-rfq/${estimateId}`, data);
+export const getVendorContacts = (vendorId) => api.get(`/email-scanner/vendor-contacts/${vendorId}`);
+export const getVendorById = (vendorId) => api.get(`/vendors/${vendorId}`);
+export const sendVendorPo = (workOrderId, data) => api.post(`/email-scanner/vendor-po/${workOrderId}`, data);
+export const parseDocumentWithAI = (file, clientName, parsingNotes) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (clientName) formData.append('clientName', clientName);
+  if (parsingNotes) formData.append('parsingNotes', parsingNotes);
+  return api.post('/email-scanner/parse-document', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000 // 60s timeout for AI processing
+  });
+};
+export const getEmailNotifications = () => api.get('/email-scanner/notifications');
+export const dismissEmailNotification = (id) => api.post(`/email-scanner/notifications/${id}/dismiss`);
+export const getMonitoredClients = () => api.get('/email-scanner/monitored-clients');
+export const retryScannedEmail = (id) => api.post(`/email-scanner/retry/${id}`);
+export const deleteScannedEmail = (id) => api.delete(`/email-scanner/history/${id}`);
+export const getGeneralParsingNotes = () => api.get('/email-scanner/general-notes');
+export const updateGeneralParsingNotes = (notes) => api.put('/email-scanner/general-notes', { notes });
+export const getGeneralScannerNotes = () => api.get('/email-scanner/general-notes');
+export const updateGeneralScannerNotes = (notes) => api.put('/email-scanner/general-notes', { notes });
+
+// Todos
+export const getTodos = (params) => api.get('/todos', { params });
+export const createTodo = (data) => api.post('/todos', data);
+export const updateTodo = (id, data) => api.put(`/todos/${id}`, data);
+export const completeTodo = (id) => api.post(`/todos/${id}/complete`);
+export const acceptTodo = (id) => api.post(`/todos/${id}/accept`);
+export const denyTodo = (id, reason) => api.post(`/todos/${id}/deny`, { reason });
+export const deleteTodo = (id) => api.delete(`/todos/${id}`);
+
+// Scrap Pickup
+export const getScrapConfig = () => api.get('/settings/scrap-config');
+export const updateScrapConfig = (data) => api.put('/settings/scrap-config', data);
+export const getScrapLog = () => api.get('/settings/scrap-log');
+export const requestScrapPickup = (scrapType) => api.post('/settings/scrap-request', { scrapType });
+export const getScrapPending = () => api.get('/settings/scrap-pending');
+export const confirmScrapPickup = (scrapType) => api.post('/settings/scrap-confirm-pickup', { scrapType });
+
+// Invoicing
+export const getInvoiceQueue = () => api.get('/workorders/invoicing/queue');
+export const getInvoiceHistory = () => api.get('/workorders/invoicing/history');
+export const recordInvoice = (id, formData) => api.post(`/workorders/${id}/invoice`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+export const uploadInvoicePdf = (id, formData) => api.post(`/workorders/${id}/invoice-pdf`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+export const clearInvoice = (id) => api.delete(`/workorders/${id}/invoice`);
+export const skipInvoice = (id, reason) => api.post(`/workorders/${id}/skip-invoice`, { reason });
+export const restoreInvoice = (id) => api.post(`/workorders/${id}/restore-invoice`);
+export const markInvoiceSent = (id, formData) => api.post(`/workorders/${id}/mark-invoice-sent`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+export const getInvoiceSkipped = () => api.get('/workorders/invoicing/skipped');
+export const getNextInvoiceNumber = () => api.get('/quickbooks/next-invoice-number');
+export const setNextInvoiceNumber = (nextNumber) => api.put('/quickbooks/next-invoice-number', { nextNumber });
+export const assignInvoiceNumber = (woId) => api.post(`/quickbooks/assign-invoice-number/${woId}`);
+export const getInvoiceNumbers = () => api.get('/quickbooks/invoice-numbers');
+export const voidInvoiceNumber = (id, reason) => api.post(`/quickbooks/invoice-numbers/${id}/void`, { reason });
+export const createManualInvoiceNumber = (data) => api.post('/quickbooks/invoice-numbers/manual', data);
+export const emailInvoice = (id, email) => api.post(`/workorders/${id}/email-invoice`, { email });
+export const repairPricing = () => api.post('/workorders/repair-pricing');

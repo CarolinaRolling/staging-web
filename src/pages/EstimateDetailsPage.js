@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Save, Upload, Eye, X, Printer, Check, FileDown, Package, FileText, Edit } from 'lucide-react';
 import {
   getEstimateById, createEstimate, updateEstimate,
@@ -8,9 +8,11 @@ import {
   downloadEstimatePDF, convertEstimateToWorkOrder,
   uploadEstimatePartFile, deleteEstimatePartFile, viewEstimatePartFile,
   searchClients, searchVendors, getSettings, resetEstimateConversion,
-  getNextDRNumber
+  getNextDRNumber, createTodo, approvePendingOrder, getPendingOrders, replyWithPdf,
+  sendVendorRfq, getVendorContacts, getVendorById, aiParseDocument
 } from '../services/api';
 import PlateRollForm from '../components/PlateRollForm';
+import OutsideProcessingSection from '../components/OutsideProcessingSection';
 import AngleRollForm from '../components/AngleRollForm';
 import FlatStockForm from '../components/FlatStockForm';
 import FabServiceForm from '../components/FabServiceForm';
@@ -21,6 +23,7 @@ import FlatBarRollForm from '../components/FlatBarRollForm';
 import ChannelRollForm from '../components/ChannelRollForm';
 import BeamRollForm from '../components/BeamRollForm';
 import ConeRollForm from '../components/ConeRollForm';
+import ShapedPlateForm from '../components/ShapedPlateForm';
 import TeeBarRollForm from '../components/TeeBarRollForm';
 import PressBrakeForm from '../components/PressBrakeForm';
 import RushServiceForm from '../components/RushServiceForm';
@@ -28,6 +31,7 @@ import HeatNumberInput from '../components/HeatNumberInput';
 
 const PART_TYPES = {
   plate_roll: { label: 'Plate Roll', icon: '🔩', desc: 'Flat plate rolling with arc calculator' },
+  shaped_plate: { label: 'Shaped Plate', icon: '⭕', desc: 'Round plates, donuts, and custom shapes' },
   cone_roll: { label: 'Cone Layout', icon: '🔺', desc: 'Cone segment design with AutoCAD export' },
   angle_roll: { label: 'Angle Roll', icon: '📐', desc: 'Angle iron rolling' },
   flat_bar: { label: 'Flat & Square Bar', icon: '▬', desc: 'Flat bar and square bar bending' },
@@ -54,6 +58,7 @@ const formatPhone = (val) => {
 function EstimateDetailsPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const fileInputRef = useRef(null);
   const isNew = id === 'new';
 
@@ -62,10 +67,25 @@ function EstimateDetailsPage() {
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [estimateTab, setEstimateTab] = useState('parts'); // parts | materials | summary
   const [partFormError, setPartFormError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState(null);
   const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [replyingWithPdf, setReplyingWithPdf] = useState(false);
+  const [showRfqModal, setShowRfqModal] = useState(false);
+  const [rfqVendorSearch, setRfqVendorSearch] = useState('');
+  const [rfqVendorResults, setRfqVendorResults] = useState([]);
+  const [rfqSelectedVendor, setRfqSelectedVendor] = useState(null);
+  const [rfqContacts, setRfqContacts] = useState([]);
+  const [rfqSelectedEmail, setRfqSelectedEmail] = useState('');
+  const [rfqSelectedParts, setRfqSelectedParts] = useState([]);
+  const [rfqSending, setRfqSending] = useState(false);
+  const [showAiParseModal, setShowAiParseModal] = useState(false);
+  const [aiParsing, setAiParsing] = useState(false);
+  const [aiParseResults, setAiParseResults] = useState(null);
+  const [aiParseNotes, setAiParseNotes] = useState('');
+  const [aiAddingParts, setAiAddingParts] = useState(false);
   const pdfPreviewActive = useRef(false);
 
   const [formData, setFormData] = useState({
@@ -91,6 +111,13 @@ function EstimateDetailsPage() {
   // Convert to Work Order state
   const [showConvertModal, setShowConvertModal] = useState(false);
   const [converting, setConverting] = useState(false);
+  const [sentForReview, setSentForReview] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState(null); // null, 'saving', 'saved'
+  const formLoadedRef = useRef(false); // tracks when formData is set from server vs user edit
+  const [clientEditing, setClientEditing] = useState(false);
+  const [selectedClient, setSelectedClient] = useState(null); // full client object with contacts
+  const [clientLocked, setClientLocked] = useState(false);
+  const [clientContacts, setClientContacts] = useState([]); // contacts from selected client
   const [nextDR, setNextDR] = useState(null);
   const [useCustomDR, setUseCustomDR] = useState(false);
   const [customDR, setCustomDR] = useState('');
@@ -130,6 +157,32 @@ function EstimateDetailsPage() {
     loadDefaultSettings();
     if (!isNew) loadEstimate(); 
   }, [id]);
+
+  // Auto-open convert modal if navigated from Pending Orders approval
+  const autoConvertTriggered = useRef(false);
+  useEffect(() => {
+    if (autoConvertTriggered.current || loading || isNew || parts.length === 0) return;
+    if (location.state?.autoConvert) {
+      autoConvertTriggered.current = true;
+      const po = location.state.poNumber || '';
+      const dueDate = location.state.requestedDate || '';
+      (async () => {
+        setConvertData({
+          clientPurchaseOrderNumber: po,
+          requestedDueDate: dueDate,
+          promisedDate: '',
+          notes: formData.notes,
+          materialReceived: false
+        });
+        setUseCustomDR(false);
+        setCustomDR('');
+        try { const res = await getNextDRNumber(); setNextDR(res.data.data.nextNumber); } catch { setNextDR(null); }
+        setShowConvertModal(true);
+      })();
+      // Clear state so refresh doesn't re-trigger
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, [loading, parts]);
 
   // Cleanup PDF blob URL on unmount
   useEffect(() => {
@@ -181,7 +234,9 @@ function EstimateDetailsPage() {
       const response = await getEstimateById(id);
       const data = response.data.data;
       setEstimate(data);
+      formLoadedRef.current = false; // suppress autosave during server load
       setFormData({
+        estimateNumber: data.estimateNumber || '',
         clientName: data.clientName || '', contactName: data.contactName || '',
         contactEmail: data.contactEmail || '', contactPhone: data.contactPhone || '',
         projectDescription: data.projectDescription || '', notes: data.notes || '',
@@ -207,7 +262,22 @@ function EstimateDetailsPage() {
           const clientRes = await searchClients(data.clientName);
           const clients = clientRes.data?.data || [];
           const client = clients.find(c => c.name === data.clientName);
-          if (client?.paymentTerms) setClientPaymentTerms(client.paymentTerms);
+          if (client) {
+            setSelectedClient(client);
+            // Build contacts list: primary + additional
+            const allContacts = [];
+            if (client.contactName) {
+              allContacts.push({ name: client.contactName, email: client.contactEmail || '', phone: client.contactPhone || '', isPrimary: true });
+            }
+            if (client.contacts && client.contacts.length > 0) {
+              client.contacts.forEach(c => { if (c.name) allContacts.push({ ...c, isPrimary: false }); });
+            }
+            setClientContacts(allContacts);
+            setClientLocked(true);
+            if (client.paymentTerms) setClientPaymentTerms(client.paymentTerms);
+          } else {
+            setClientLocked(!!data.clientName);
+          }
           // Auto tax exempt for verified resale clients (only if not already saved on estimate)
           if (client && !data.taxExempt) {
             const clientIsExempt = client.taxStatus === 'resale' || client.taxStatus === 'exempt' ||
@@ -232,11 +302,29 @@ function EstimateDetailsPage() {
     } finally {
       setLoading(false);
       initialLoadDone.current = true;
+      // Enable autosave after a brief delay to let state settle
+      setTimeout(() => { formLoadedRef.current = true; }, 500);
       if (isReload) {
         requestAnimationFrame(() => window.scrollTo(0, scrollY));
       }
     }
   };
+
+  // Autosave formData changes after 2 second debounce (only for existing estimates)
+  useEffect(() => {
+    if (isNew || !formLoadedRef.current || !id) return;
+    const timer = setTimeout(async () => {
+      try {
+        setAutoSaveStatus('saving');
+        await updateEstimate(id, { ...formData, status: estimate?.status || 'draft' });
+        setAutoSaveStatus('saved');
+        setTimeout(() => setAutoSaveStatus(null), 2000);
+      } catch (err) {
+        setAutoSaveStatus(null);
+      }
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [formData]);
 
   // Round up material cost after markup
   const roundUpMaterial = (value, rounding) => {
@@ -785,6 +873,17 @@ function EstimateDetailsPage() {
       if (!partData._rollToMethod && !partData._rollValue && !partData.radius && !partData.diameter) warnings.push('Roll value (radius or diameter) is required');
     }
 
+    if (partData.partType === 'shaped_plate') {
+      if (!partData.thickness) warnings.push('Thickness is required');
+      const shape = partData._shapeType || 'round';
+      if ((shape === 'round' || shape === 'donut') && !partData.outerDiameter) warnings.push('Outer Diameter (OD) is required');
+      if (shape === 'donut' && !partData._innerDiameter) warnings.push('Inner Diameter (ID) is required');
+      if (shape === 'donut' && partData._innerDiameter && partData.outerDiameter && parseFloat(partData._innerDiameter) >= parseFloat(partData.outerDiameter)) {
+        warnings.push('Inner Diameter must be smaller than Outer Diameter');
+      }
+      if (shape === 'custom' && !partData._customDescription) warnings.push('Shape description is required');
+    }
+
     if (partData.partType === 'flat_stock') {
       if (!partData._stockType) warnings.push('Stock type is required');
       if (partData._stockType === 'plate' && !partData.thickness) warnings.push('Thickness is required');
@@ -918,7 +1017,7 @@ function EstimateDetailsPage() {
       if (!dataToSend.rollType) dataToSend.rollType = null;
       
       // Recalculate partTotal at save time to avoid useEffect timing issues
-      const EA_PRICED = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
+      const EA_PRICED = ['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
       // Clean price fields to exact 2-decimal values
       if (dataToSend.laborTotal) dataToSend.laborTotal = (Math.round(parseFloat(dataToSend.laborTotal) * 100) / 100).toFixed(2);
       if (dataToSend.materialTotal) dataToSend.materialTotal = (Math.round(parseFloat(dataToSend.materialTotal) * 100) / 100).toFixed(2);
@@ -929,7 +1028,14 @@ function EstimateDetailsPage() {
         const matEachRaw = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
         const matEach = roundUpMaterial(matEachRaw, dataToSend._materialRounding);
         const labEach = parseFloat(dataToSend.laborTotal) || 0;
-        dataToSend.partTotal = ((matEach + labEach) * qty).toFixed(2);
+        // Outside processing with markup
+        const opCost = parseFloat(dataToSend.outsideProcessingCost) || 0;
+        const opMarkup = parseFloat(dataToSend.outsideProcessingMarkupPercent) || 0;
+        const opEach = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
+        const opTransport = parseFloat(dataToSend.outsideProcessingTransportCost) || 0;
+        const opTransportMarkup = parseFloat(dataToSend.outsideProcessingTransportMarkupPercent) || 0;
+        const opTransportEach = Math.round(opTransport * (1 + opTransportMarkup / 100) * 100) / 100;
+        dataToSend.partTotal = ((matEach + labEach + opEach + opTransportEach) * qty).toFixed(2);
       }
       
       let savedPartId = editingPart?.id;
@@ -1000,6 +1106,11 @@ function EstimateDetailsPage() {
   };
 
   const handleViewFile = async (file) => {
+    // S3 files: open directly
+    if (file.url && file.url.includes('amazonaws.com')) {
+      window.open(file.url, '_blank');
+      return;
+    }
     try {
       const data = await getEstimateFileSignedUrl(id, file.id);
       window.open(data.url, '_blank');
@@ -1028,17 +1139,20 @@ function EstimateDetailsPage() {
   };
 
   const handleViewPartFile = async (partId, file) => {
+    // S3 files: open directly — no proxy needed
+    if (file.url && file.url.includes('amazonaws.com')) {
+      window.open(file.url, '_blank');
+      return;
+    }
     try {
       const response = await viewEstimatePartFile(id, partId, file.id);
       const url = response.data?.data?.url || response.data?.url;
       if (url) {
         window.open(url, '_blank');
       } else {
-        // Fallback to direct URL
         window.open(file.url, '_blank');
       }
     } catch (err) {
-      // Fallback to direct URL if proxy fails
       window.open(file.url, '_blank');
     }
   };
@@ -1050,6 +1164,31 @@ function EstimateDetailsPage() {
       await loadEstimate();
       showMessage('File deleted');
     } catch (err) { setError('Failed to delete file'); }
+  };
+
+  // Send estimate for pricing review
+  const handleSendForReview = async () => {
+    try {
+      // Get estimate number from multiple sources for robustness
+      const estNum = estimate?.estimateNumber || formData.estimateNumber || document.querySelector('.page-title')?.textContent?.trim() || 'Estimate';
+      const clientName = formData.clientName || estimate?.clientName || '';
+      const titleParts = [estNum];
+      if (clientName) titleParts.push(clientName);
+      
+      await createTodo({
+        title: `Review pricing: ${titleParts.join(' — ')}`,
+        description: `${parts.length} part(s). Review pricing and accept or deny.`,
+        type: 'estimate_review',
+        priority: 'high',
+        estimateId: id,
+        estimateNumber: estNum
+      });
+      setSentForReview(true);
+      showMessage('Sent to head estimator for review');
+      setTimeout(() => setSentForReview(false), 5000);
+    } catch (err) {
+      setError('Failed to send for review');
+    }
   };
 
   // Convert to Work Order Handlers
@@ -1083,6 +1222,15 @@ function EstimateDetailsPage() {
       const response = await convertEstimateToWorkOrder(id, payload);
       const workOrder = response.data.data.workOrder;
       setShowConvertModal(false);
+      
+      // Auto-approve any pending orders linked to this estimate
+      try {
+        const poRes = await getPendingOrders('pending');
+        const linked = (poRes.data.data || []).filter(o => o.matchedEstimateId === id);
+        for (const order of linked) {
+          await approvePendingOrder(order.id, {}).catch(() => {});
+        }
+      } catch (e) { /* ignore */ }
       
       const message = `Work order DR-${workOrder.drNumber} created!`;
       showMessage(message);
@@ -1375,15 +1523,22 @@ function EstimateDetailsPage() {
           </div>
         </div>
         <div className="actions-row">
+          {!isNew && <button className="btn btn-outline" onClick={printEstimate}><Printer size={18} /> Print</button>}
           {!isNew && (
             <button className="btn btn-outline" onClick={generatePdfPreview} disabled={pdfGenerating}>
               <Eye size={18} /> {pdfGenerating ? 'Generating...' : 'Generate PDF'}
             </button>
           )}
-          {!isNew && <button className="btn btn-outline" onClick={printEstimate}><Printer size={18} /> Print</button>}
-          <button className="btn btn-secondary" onClick={() => handleSave(false)} disabled={saving}>
-            <Save size={18} /> {saving ? 'Saving...' : isNew ? 'Generate New Estimate' : 'Save'}
-          </button>
+          {isNew && (
+            <button className="btn btn-secondary" onClick={() => handleSave(false)} disabled={saving}>
+              <Save size={18} /> {saving ? 'Saving...' : 'Generate New Estimate'}
+            </button>
+          )}
+          {!isNew && autoSaveStatus && (
+            <span style={{ fontSize: '0.8rem', color: autoSaveStatus === 'saving' ? '#ff9800' : '#4caf50', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+              {autoSaveStatus === 'saving' ? '⏳ Saving...' : '✓ Saved'}
+            </span>
+          )}
           {!isNew && !estimate?.workOrderId && (
             <button className="btn" onClick={openConvertModal} disabled={converting}
               style={{ background: '#2e7d32', color: 'white' }}>
@@ -1586,7 +1741,7 @@ function EstimateDetailsPage() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: estimateTab === 'parts' || isNew ? '2fr 1fr' : '1fr', gap: 16 }}>
         <div>
           {/* Client Info */}
           <div className="card">
@@ -1602,95 +1757,143 @@ function EstimateDetailsPage() {
             <div className="grid grid-2">
               <div className="form-group" style={{ position: 'relative' }}>
                 <label className="form-label">Client Name *</label>
-                <input 
-                  type="text" 
-                  className="form-input" 
-                  value={formData.clientName}
-                  ref={clientInputRef}
-                  onChange={async (e) => {
-                    const value = e.target.value;
-                    setFormData({ ...formData, clientName: value });
-                    if (value.length >= 2) {
-                      try {
-                        const res = await searchClients(value);
-                        setClientSuggestions(res.data.data || []);
-                        setShowClientSuggestions(true);
-                      } catch (err) {
-                        setClientSuggestions([]);
-                      }
-                    } else {
-                      setClientSuggestions([]);
-                      setShowClientSuggestions(false);
-                    }
-                  }}
-                  onFocus={() => clientSuggestions.length > 0 && setShowClientSuggestions(true)}
-                  onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
-                  autoComplete="off"
-                />
-                {showClientSuggestions && clientSuggestions.length > 0 && (
-                  <div style={{
-                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
-                    background: 'white', border: '1px solid #ddd', borderRadius: 4,
-                    maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
-                  }}>
-                    {clientSuggestions.map(client => (
-                      <div 
-                        key={client.id}
-                        style={{ 
-                          padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid #eee',
-                          display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-                        }}
-                        onMouseDown={() => {
-                          // Apply client data
-                          setFormData({
-                            ...formData,
-                            clientName: client.name,
-                            contactName: client.contactName || formData.contactName,
-                            contactEmail: client.contactEmail || formData.contactEmail,
-                            contactPhone: client.contactPhone || formData.contactPhone,
-                            // Apply tax settings - auto exempt for resale/exempt or verified resale certs
-                            taxExempt: client.taxStatus === 'resale' || client.taxStatus === 'exempt' || 
-                              (!!client.resaleCertificate && client.permitStatus === 'active'),
-                            taxExemptReason: (client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? 'Resale' : (client.taxStatus === 'exempt' ? 'Tax Exempt' : ''),
-                            taxExemptCertNumber: client.resaleCertificate || '',
-                            useCustomTax: !!client.customTaxRate,
-                            taxRate: client.customTaxRate ? parseFloat(client.customTaxRate) * 100 : formData.taxRate
-                          });
+                {clientLocked && !isNew ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ flex: 1, padding: '8px 12px', background: '#f5f5f5', borderRadius: 6, fontWeight: 600, fontSize: '0.95rem', border: '1px solid #e0e0e0' }}>
+                      {formData.clientName}
+                    </div>
+                    <button type="button" onClick={() => setClientLocked(false)}
+                      style={{ background: '#e3f2fd', border: '1px solid #90caf9', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, color: '#1565c0' }}>
+                      ✏️ Change
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <input 
+                      type="text" 
+                      className="form-input" 
+                      value={formData.clientName}
+                      ref={clientInputRef}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        setFormData({ ...formData, clientName: value });
+                        if (value.length >= 2) {
+                          try {
+                            const res = await searchClients(value);
+                            setClientSuggestions(res.data.data || []);
+                            setShowClientSuggestions(true);
+                          } catch (err) {
+                            setClientSuggestions([]);
+                          }
+                        } else {
+                          setClientSuggestions([]);
                           setShowClientSuggestions(false);
-                          setClientPaymentTerms(client.paymentTerms || null);
-                          showMessage(`Applied ${client.name}'s info`);
-                        }}
-                      >
-                        <div>
-                          <strong>{client.name}</strong>
-                          {client.contactName && <div style={{ fontSize: '0.8rem', color: '#666' }}>{client.contactName}</div>}
-                        </div>
-                        <span style={{ 
-                          fontSize: '0.7rem', padding: '2px 6px', borderRadius: 4,
-                          background: (client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? '#fff3e0' : client.taxStatus === 'exempt' ? '#e8f5e9' : '#e3f2fd',
-                          color: (client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? '#e65100' : client.taxStatus === 'exempt' ? '#2e7d32' : '#1565c0'
-                        }}>
-                          {(client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? '✅ Resale' : client.taxStatus === 'exempt' ? 'Exempt' : 'Taxable'}
-                        </span>
-                      </div>
-                    ))}
-                    {formData.clientName && formData.clientName.length >= 2 && !clientSuggestions.some(c => c.name.toLowerCase() === formData.clientName.toLowerCase()) && (
-                      <div style={{ padding: '8px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600, borderTop: '2px solid #c8e6c9' }}
-                        onMouseDown={() => {
-                          setShowClientSuggestions(false);
-                          navigate(`/clients-vendors?addClient=${encodeURIComponent(formData.clientName)}`);
-                        }}>
-                        + Add "{formData.clientName}" as new client
+                        }
+                      }}
+                      onFocus={() => clientSuggestions.length > 0 && setShowClientSuggestions(true)}
+                      onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
+                      autoComplete="off"
+                    />
+                    {showClientSuggestions && clientSuggestions.length > 0 && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
+                        background: 'white', border: '1px solid #ddd', borderRadius: 4,
+                        maxHeight: 200, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
+                      }}>
+                        {clientSuggestions.map(client => (
+                          <div 
+                            key={client.id}
+                            style={{ 
+                              padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid #eee',
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                            }}
+                            onMouseDown={() => {
+                              // Build full contacts list: primary + additional
+                              const allContacts = [];
+                              if (client.contactName) {
+                                allContacts.push({ name: client.contactName, email: client.contactEmail || '', phone: client.contactPhone || '', isPrimary: true });
+                              }
+                              if (client.contacts && client.contacts.length > 0) {
+                                client.contacts.forEach(c => { if (c.name) allContacts.push({ ...c, isPrimary: false }); });
+                              }
+                              const primary = allContacts.find(c => c.isPrimary) || allContacts[0] || {};
+                              setFormData({
+                                ...formData,
+                                clientName: client.name,
+                                contactName: primary.name || formData.contactName,
+                                contactEmail: primary.email || formData.contactEmail,
+                                contactPhone: primary.phone || formData.contactPhone,
+                                taxExempt: client.taxStatus === 'resale' || client.taxStatus === 'exempt' || 
+                                  (!!client.resaleCertificate && client.permitStatus === 'active'),
+                                taxExemptReason: (client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? 'Resale' : (client.taxStatus === 'exempt' ? 'Tax Exempt' : ''),
+                                taxExemptCertNumber: client.resaleCertificate || '',
+                                useCustomTax: !!client.customTaxRate,
+                                taxRate: client.customTaxRate ? parseFloat(client.customTaxRate) * 100 : formData.taxRate
+                              });
+                              setSelectedClient(client);
+                              setClientContacts(allContacts);
+                              setClientLocked(true);
+                              setShowClientSuggestions(false);
+                              setClientPaymentTerms(client.paymentTerms || null);
+                              showMessage(`Applied ${client.name}'s info`);
+                            }}
+                          >
+                            <div>
+                              <strong>{client.name}</strong>
+                              {client.contactName && <div style={{ fontSize: '0.8rem', color: '#666' }}>{client.contactName}</div>}
+                            </div>
+                            <span style={{ 
+                              fontSize: '0.7rem', padding: '2px 6px', borderRadius: 4,
+                              background: (client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? '#fff3e0' : client.taxStatus === 'exempt' ? '#e8f5e9' : '#e3f2fd',
+                              color: (client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? '#e65100' : client.taxStatus === 'exempt' ? '#2e7d32' : '#1565c0'
+                            }}>
+                              {(client.taxStatus === 'resale' || (client.resaleCertificate && client.permitStatus === 'active')) ? '✅ Resale' : client.taxStatus === 'exempt' ? 'Exempt' : 'Taxable'}
+                            </span>
+                          </div>
+                        ))}
+                        {formData.clientName && formData.clientName.length >= 2 && !clientSuggestions.some(c => c.name.toLowerCase() === formData.clientName.toLowerCase()) && (
+                          <div style={{ padding: '8px 12px', cursor: 'pointer', background: '#e8f5e9', color: '#2e7d32', fontWeight: 600, borderTop: '2px solid #c8e6c9' }}
+                            onMouseDown={() => {
+                              setShowClientSuggestions(false);
+                              navigate(`/clients-vendors?addClient=${encodeURIComponent(formData.clientName)}`);
+                            }}>
+                            + Add "{formData.clientName}" as new client
+                          </div>
+                        )}
                       </div>
                     )}
-                  </div>
+                  </>
                 )}
               </div>
-              <div className="form-group">
-                <label className="form-label">Contact Name</label>
-                <input type="text" className="form-input" value={formData.contactName}
-                  onChange={(e) => setFormData({ ...formData, contactName: e.target.value })} />
-              </div>
+
+              {/* Contact picker — if client has multiple contacts, show dropdown */}
+              {clientContacts.length > 1 ? (
+                <div className="form-group">
+                  <label className="form-label">Contact Person</label>
+                  <select className="form-select" 
+                    value={formData.contactName || ''}
+                    onChange={(e) => {
+                      const contact = clientContacts.find(c => c.name === e.target.value);
+                      if (contact) {
+                        setFormData({ ...formData, contactName: contact.name, contactEmail: contact.email || '', contactPhone: contact.phone || '' });
+                      } else if (e.target.value === '__custom__') {
+                        setFormData({ ...formData, contactName: '', contactEmail: '', contactPhone: '' });
+                      }
+                    }}>
+                    {clientContacts.map((c, i) => (
+                      <option key={i} value={c.name}>{c.name}{c.isPrimary ? ' (Primary)' : ''}</option>
+                    ))}
+                    <option value="__custom__">+ Enter manually...</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="form-group">
+                  <label className="form-label">Contact Name</label>
+                  <input type="text" className="form-input" value={formData.contactName}
+                    onChange={(e) => setFormData({ ...formData, contactName: e.target.value })} />
+                </div>
+              )}
+
               <div className="form-group">
                 <label className="form-label">Email</label>
                 <input type="email" className="form-input" value={formData.contactEmail}
@@ -1714,6 +1917,88 @@ function EstimateDetailsPage() {
               </div>
             </div>
           </div>
+
+          {/* Tab Navigation */}
+          {!isNew && (
+            <div id="estimate-tabs" style={{ display: 'flex', gap: 0, borderBottom: '2px solid #e0e0e0', marginBottom: 16 }}>
+              {[
+                { key: 'parts', label: '📦 Parts', count: parts.length },
+                { key: 'materials', label: '📋 Materials' },
+                { key: 'summary', label: '📊 Summary' }
+              ].map(tab => (
+                <button key={tab.key} onClick={(e) => { e.preventDefault(); setEstimateTab(tab.key); setTimeout(() => document.getElementById('estimate-tabs')?.scrollIntoView({ behavior: 'instant', block: 'start' }), 0); }}
+                  style={{
+                    padding: '10px 20px', border: 'none', cursor: 'pointer',
+                    background: estimateTab === tab.key ? '#1976d2' : 'transparent',
+                    color: estimateTab === tab.key ? 'white' : '#555',
+                    fontWeight: estimateTab === tab.key ? 700 : 500,
+                    fontSize: '0.95rem', borderRadius: '8px 8px 0 0',
+                    transition: 'all 0.15s'
+                  }}>
+                  {tab.label}{tab.count !== undefined ? ` (${tab.count})` : ''}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Workflow Actions Row */}
+          {!isNew && estimateTab === 'parts' && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+              {estimate?.emailLink && (
+                <a href={estimate.emailLink} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline"
+                  style={{ textDecoration: 'none', fontSize: '0.85rem' }}>📧 View Email</a>
+              )}
+              {estimate?.scannedEmailId && (
+                <button className="btn btn-sm btn-outline" disabled={replyingWithPdf} onClick={async () => {
+                  try {
+                    setReplyingWithPdf(true);
+                    const res = await replyWithPdf(id);
+                    const draftUrl = res.data.data?.draftUrl;
+                    if (draftUrl) { window.open(draftUrl, '_blank'); showMessage('Gmail draft created'); }
+                  } catch (err) { setError(err.response?.data?.error?.message || 'Failed'); }
+                  finally { setReplyingWithPdf(false); }
+                }} style={{ fontSize: '0.85rem' }}>
+                  {replyingWithPdf ? '⏳...' : '↩️ Reply with Quote'}
+                </button>
+              )}
+              <button className="btn btn-sm" onClick={handleSendForReview} disabled={sentForReview}
+                style={{ background: sentForReview ? '#c8e6c9' : '#ff9800', color: sentForReview ? '#2e7d32' : 'white', fontSize: '0.85rem' }}>
+                {sentForReview ? '✓ Sent' : '📋 Send for Review'}
+              </button>
+              <button className="btn btn-sm btn-outline" onClick={generatePdfPreview} disabled={pdfGenerating}
+                style={{ fontSize: '0.85rem' }}>
+                <Eye size={14} /> {pdfGenerating ? 'Generating...' : 'Generate PDF'}
+              </button>
+              <button className="btn btn-sm btn-outline" onClick={() => { setShowAiParseModal(true); setAiParseResults(null); setAiParseNotes(''); }}
+                style={{ fontSize: '0.85rem', color: '#00838f', borderColor: '#00838f' }}>
+                🤖 Upload to AI
+              </button>
+            </div>
+          )}
+
+          {/* ===== PARTS TAB ===== */}
+          {(isNew || estimateTab === 'parts') && (
+          <>
+          {/* Internal Notes */}
+          {!isNew && (
+            <div className="card" style={{ background: '#FFFDE7', border: '1px solid #FFF9C4' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <h3 className="card-title" style={{ margin: 0, fontSize: '0.95rem' }}>📝 Internal Notes <span style={{ fontWeight: 400, fontSize: '0.8rem', color: '#888' }}>(not visible to customer)</span></h3>
+                <button className="btn btn-sm" onClick={async () => {
+                  try {
+                    await updateEstimate(id, { internalNotes: formData.internalNotes || '' });
+                    showMessage('Internal notes saved');
+                  } catch { setError('Failed to save notes'); }
+                }} style={{ fontSize: '0.75rem', padding: '4px 12px' }}>
+                  💾 Save Notes
+                </button>
+              </div>
+              <textarea className="form-textarea" value={formData.internalNotes || ''}
+                onChange={(e) => setFormData({ ...formData, internalNotes: e.target.value })}
+                rows={3} style={{ background: 'white' }}
+                placeholder="Internal notes about this estimate..." />
+            </div>
+          )}
 
           {/* Parts */}
           <div className="card">
@@ -1778,7 +2063,7 @@ function EstimateDetailsPage() {
                       <div style={{ color: '#666', fontSize: '0.85rem' }}>
                         {part.clientPartNumber && `Client Part#: ${part.clientPartNumber}`}
                         {part.heatNumber && ` • Heat#: ${part.heatNumber}`}
-                        {part.cutFileReference && ` • Cut File: ${part.cutFileReference}`}
+                        {part.cutFileReference && ` • 📐 ${part.cutFileReference}`}
                       </div>
                     </div>
                     <div className="actions-row">
@@ -1791,6 +2076,50 @@ function EstimateDetailsPage() {
                       <button className="btn btn-sm btn-danger" onClick={() => handleDeletePart(part.id)}><Trash2 size={14} /></button>
                     </div>
                   </div>
+
+                  {/* Outside Processing indicator */}
+                  {part.outsideProcessingVendorName && (
+                    <div style={{ padding: '8px 12px', background: '#FFF3E0', borderRadius: 6, marginBottom: 8, border: '1px solid #FFE0B2', fontSize: '0.85rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div>
+                          <span style={{ fontWeight: 600, color: '#E65100' }}>🏭 Outside Processing: </span>
+                          <span>{part.outsideProcessingVendorName}</span>
+                          {part.outsideProcessingDescription && <span style={{ color: '#888' }}> — {part.outsideProcessingDescription}</span>}
+                          <span style={{ marginLeft: 8, fontWeight: 600 }}>
+                            ${((parseFloat(part.outsideProcessingCost) || 0) * (1 + (parseFloat(part.outsideProcessingMarkupPercent) || 0) / 100)).toFixed(2)}/ea
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                          {part.outsideProcessingPONumber ? (
+                            <span style={{ background: '#E8F5E9', padding: '2px 8px', borderRadius: 4, fontSize: '0.8rem', color: '#2e7d32', fontWeight: 600 }}>
+                              ✅ {part.outsideProcessingPONumber}
+                            </span>
+                          ) : (
+                            <button className="btn btn-sm" onClick={async () => {
+                              try {
+                                const { generateOutsideProcessingPO, emailOutsideProcessingPO } = await import('../services/api');
+                                const res = await generateOutsideProcessingPO(id, part.id);
+                                const poData = res.data.data;
+                                showMessage(`PO ${poData.poNumber} generated`);
+                                // Auto-email if vendor has email
+                                if (poData.vendorEmail) {
+                                  const emailRes = await emailOutsideProcessingPO(id, part.id);
+                                  const draftUrl = emailRes.data.data?.draftUrl;
+                                  if (draftUrl) window.open(draftUrl, '_blank');
+                                  showMessage(`PO ${poData.poNumber} draft created in Gmail`);
+                                }
+                                await loadEstimate();
+                              } catch (err) {
+                                setError(err.response?.data?.error?.message || 'Failed to generate PO');
+                              }
+                            }} style={{ background: '#E65100', color: 'white', fontSize: '0.75rem', padding: '3px 8px' }}>
+                              📄 Generate & Email PO
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div style={{ fontSize: '0.875rem', marginBottom: 12 }}>
                     {/* Rush Service Display */}
@@ -2034,16 +2363,21 @@ function EstimateDetailsPage() {
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                         {part.files.map(file => (
                           <div key={file.id} style={{
-                            display: 'flex', alignItems: 'center', gap: 8, background: 'white',
+                            display: 'flex', alignItems: 'center', gap: 6, background: 'white',
                             padding: '6px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: '0.8rem'
                           }}>
-                            <FileText size={14} style={{ color: '#1976d2' }} />
-                            <button onClick={() => handleViewPartFile(part.id, file)}
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1976d2', textDecoration: 'underline', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', padding: 0 }}>
+                            <FileText size={14} style={{ color: '#1976d2', flexShrink: 0 }} />
+                            <span style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem' }}>
                               {file.originalName || file.filename}
+                            </span>
+                            <button onClick={() => handleViewPartFile(part.id, file)}
+                              title="View file"
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#1976d2', padding: 2, flexShrink: 0 }}>
+                              <Eye size={14} />
                             </button>
                             <button onClick={() => handleDeletePartFile(part.id, file.id)}
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#d32f2f', padding: 2 }}>
+                              title="Delete file"
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#d32f2f', padding: 2, flexShrink: 0 }}>
                               <X size={14} />
                             </button>
                           </div>
@@ -2110,15 +2444,340 @@ function EstimateDetailsPage() {
               <textarea className="form-textarea" value={formData.notes}
                 onChange={(e) => setFormData({ ...formData, notes: e.target.value })} />
             </div>
-            <div className="form-group">
-              <label className="form-label">Internal Notes (not visible)</label>
-              <textarea className="form-textarea" value={formData.internalNotes}
-                onChange={(e) => setFormData({ ...formData, internalNotes: e.target.value })} />
-            </div>
           </div>
+          </>
+          )}
+
+          {/* ===== MATERIALS TAB ===== */}
+          {!isNew && estimateTab === 'materials' && (
+            <div style={{ minHeight: '70vh' }}>
+              <div className="card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <h3 className="card-title" style={{ margin: 0 }}>📋 Bill of Materials</h3>
+                  <button className="btn btn-sm btn-outline" onClick={() => { setShowAiParseModal(true); setAiParseResults(null); setAiParseNotes(''); }}
+                    style={{ color: '#00838f', borderColor: '#00838f' }}>🤖 Upload to AI</button>
+                </div>
+
+                {(() => {
+                  const materialParts = parts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
+                  if (materialParts.length === 0) return <p style={{ color: '#888', textAlign: 'center', padding: 20 }}>No parts added yet</p>;
+
+                  // Group by source
+                  const bySource = { customer_supplied: [], we_order: [], in_stock: [] };
+                  materialParts.forEach(p => {
+                    const src = p.materialSource || 'customer_supplied';
+                    if (!bySource[src]) bySource[src] = [];
+                    bySource[src].push(p);
+                  });
+
+                  // Group we_order by vendor
+                  const byVendor = {};
+                  bySource.we_order.forEach(p => {
+                    const vKey = p.supplierName || 'Unassigned Vendor';
+                    if (!byVendor[vKey]) byVendor[vKey] = { vendorId: p.vendorId, parts: [] };
+                    byVendor[vKey].parts.push(p);
+                  });
+
+                  const sourceLabels = { customer_supplied: '👤 Client Supplied', in_stock: '🏭 In Stock (We Supply)' };
+
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      {/* Client Supplied */}
+                      {bySource.customer_supplied.length > 0 && (
+                        <div style={{ border: '1px solid #e0e0e0', borderRadius: 8, overflow: 'hidden' }}>
+                          <div style={{ padding: '10px 16px', background: '#f5f5f5', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #e0e0e0' }}>
+                            {sourceLabels.customer_supplied} ({bySource.customer_supplied.length})
+                          </div>
+                          {bySource.customer_supplied.map(p => {
+                            const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+                            return (
+                              <div key={p.id} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Part #{p.partNumber}</span>
+                                  <span style={{ color: '#555', marginLeft: 8, fontSize: '0.85rem' }}>({p.quantity || 1}pc) {fd._materialDescription || p.materialDescription || PART_TYPES[p.partType]?.label}</span>
+                                  {p.materialReceived && <span style={{ marginLeft: 8, color: '#2e7d32', fontSize: '0.8rem' }}>✅ Received</span>}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* In Stock */}
+                      {bySource.in_stock.length > 0 && (
+                        <div style={{ border: '1px solid #c8e6c9', borderRadius: 8, overflow: 'hidden' }}>
+                          <div style={{ padding: '10px 16px', background: '#e8f5e9', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #c8e6c9' }}>
+                            {sourceLabels.in_stock} ({bySource.in_stock.length})
+                          </div>
+                          {bySource.in_stock.map(p => {
+                            const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+                            return (
+                              <div key={p.id} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Part #{p.partNumber}</span>
+                                  <span style={{ color: '#555', marginLeft: 8, fontSize: '0.85rem' }}>({p.quantity || 1}pc) {fd._materialDescription || p.materialDescription || PART_TYPES[p.partType]?.label}</span>
+                                </div>
+                                <span style={{ fontWeight: 600, color: '#E65100' }}>${(parseFloat(p.materialTotal) || 0).toFixed(2)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Vendors — one group per vendor */}
+                      {Object.entries(byVendor).map(([vendorName, { vendorId, parts: vParts }]) => (
+                        <div key={vendorName} style={{ border: '1px solid #CE93D8', borderRadius: 8, overflow: 'hidden' }}>
+                          <div style={{ padding: '10px 16px', background: '#F3E5F5', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #CE93D8', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span>🏢 {vendorName} ({vParts.length})</span>
+                            <button className="btn btn-sm" onClick={async () => {
+                              setRfqSelectedParts(vParts.map(p => p.id));
+                              setRfqVendorSearch('');
+                              setRfqVendorResults([]);
+                              setRfqContacts([]);
+                              setRfqSelectedEmail('');
+                              if (vendorId) {
+                                try {
+                                  const vRes = await getVendorById(vendorId);
+                                  const vendor = vRes.data.data;
+                                  if (vendor) {
+                                    setRfqSelectedVendor(vendor);
+                                    const cRes = await getVendorContacts(vendor.id);
+                                    const contacts = cRes.data.data || [];
+                                    setRfqContacts(contacts);
+                                    if (contacts.length > 0) setRfqSelectedEmail(contacts[0].email);
+                                  } else setRfqSelectedVendor(null);
+                                } catch { setRfqSelectedVendor(null); }
+                              } else {
+                                setRfqVendorSearch(vendorName);
+                                setRfqSelectedVendor(null);
+                                try { const vRes = await searchVendors(vendorName); setRfqVendorResults(vRes.data.data || []); } catch {}
+                              }
+                              setShowRfqModal(true);
+                            }} style={{ background: '#7B1FA2', color: 'white', fontSize: '0.8rem' }}>
+                              📤 Send RFQ
+                            </button>
+                          </div>
+                          {vParts.map(p => {
+                            const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+                            return (
+                              <div key={p.id} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Part #{p.partNumber}</span>
+                                  <span style={{ color: '#555', marginLeft: 8, fontSize: '0.85rem' }}>({p.quantity || 1}pc) {fd._materialDescription || p.materialDescription || PART_TYPES[p.partType]?.label}</span>
+                                  {p.materialOrdered && <span style={{ marginLeft: 8, color: '#2e7d32', fontSize: '0.8rem' }}>✅ PO: {p.materialPurchaseOrderNumber}</span>}
+                                  {p.cutFileReference && <span style={{ marginLeft: 8, color: '#1565c0', fontSize: '0.8rem' }}>📐 {p.cutFileReference}</span>}
+                                </div>
+                                <span style={{ fontWeight: 600, color: '#E65100' }}>${(parseFloat(p.materialTotal) || 0).toFixed(2)}</span>
+                              </div>
+                            );
+                          })}
+                          <div style={{ padding: '8px 16px', background: '#fafafa', borderTop: '1px solid #f0f0f0', display: 'flex', justifyContent: 'flex-end', fontWeight: 700, fontSize: '0.9rem', color: '#E65100' }}>
+                            Vendor Total: ${vParts.reduce((s, p) => s + (parseFloat(p.materialTotal) || 0), 0).toFixed(2)}
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Outside Processing summary */}
+                      {parts.some(p => p.outsideProcessingVendorName) && (
+                        <div style={{ border: '1px solid #FFE0B2', borderRadius: 8, overflow: 'hidden' }}>
+                          <div style={{ padding: '10px 16px', background: '#FFF3E0', fontWeight: 700, fontSize: '0.95rem', borderBottom: '1px solid #FFE0B2' }}>
+                            🏭 Outside Processing
+                          </div>
+                          {parts.filter(p => p.outsideProcessingVendorName).map(p => {
+                            const opCost = parseFloat(p.outsideProcessingCost) || 0;
+                            const opTransport = parseFloat(p.outsideProcessingTransportCost) || 0;
+                            return (
+                              <div key={p.id} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div>
+                                  <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>Part #{p.partNumber}</span>
+                                  <span style={{ color: '#E65100', marginLeft: 8, fontSize: '0.85rem' }}>{p.outsideProcessingVendorName}</span>
+                                  <span style={{ color: '#888', marginLeft: 8, fontSize: '0.8rem' }}>{p.outsideProcessingDescription}</span>
+                                  {p.outsideProcessingPONumber && <span style={{ marginLeft: 8, color: '#2e7d32', fontSize: '0.8rem' }}>✅ {p.outsideProcessingPONumber}</span>}
+                                </div>
+                                <span style={{ fontWeight: 600, color: '#E65100' }}>${(opCost + opTransport).toFixed(2)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
+          {/* ===== SUMMARY TAB ===== */}
+          {!isNew && estimateTab === 'summary' && (
+            <div style={{ minHeight: '70vh' }}>
+              <div className="card">
+                <h3 className="card-title" style={{ marginBottom: 20 }}>📊 Job Cost Summary</h3>
+
+                {(() => {
+                  const materialParts = parts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
+                  
+                  // Material costs (our cost vs what client pays)
+                  let totalMaterialCost = 0;
+                  let totalMaterialBilled = 0;
+                  let totalLaborInHouse = 0;
+                  let totalOutsideCost = 0;
+                  let totalOutsideBilled = 0;
+                  let totalTransportCost = 0;
+                  let totalTransportBilled = 0;
+
+                  materialParts.forEach(p => {
+                    const qty = parseInt(p.quantity) || 1;
+                    const matCost = parseFloat(p.materialTotal) || 0;
+                    const matMarkup = parseFloat(p.materialMarkupPercent) || 0;
+                    const matBilled = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
+                    totalMaterialCost += matCost * qty;
+                    totalMaterialBilled += matBilled * qty;
+
+                    const labor = parseFloat(p.laborTotal) || 0;
+                    totalLaborInHouse += labor * qty;
+
+                    const opCost = parseFloat(p.outsideProcessingCost) || 0;
+                    const opMarkup = parseFloat(p.outsideProcessingMarkupPercent) || 0;
+                    const opBilled = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
+                    totalOutsideCost += opCost * qty;
+                    totalOutsideBilled += opBilled * qty;
+
+                    const tCost = parseFloat(p.outsideProcessingTransportCost) || 0;
+                    const tMarkup = parseFloat(p.outsideProcessingTransportMarkupPercent) || 0;
+                    const tBilled = Math.round(tCost * (1 + tMarkup / 100) * 100) / 100;
+                    totalTransportCost += tCost * qty;
+                    totalTransportBilled += tBilled * qty;
+                  });
+
+                  // Services (fab, shop rate)
+                  let totalServicesCost = 0;
+                  parts.filter(p => ['fab_service', 'shop_rate'].includes(p.partType)).forEach(p => {
+                    totalServicesCost += parseFloat(p.partTotal) || 0;
+                  });
+
+                  const trucking = parseFloat(formData.truckingCost) || 0;
+                  const totalOurCost = totalMaterialCost + totalOutsideCost + totalTransportCost;
+                  const totalMarkupProfit = (totalMaterialBilled - totalMaterialCost) + (totalOutsideBilled - totalOutsideCost) + (totalTransportBilled - totalTransportCost);
+                  const totalRevenue = totals.grandTotal;
+                  const totalExpenses = totalOurCost + trucking;
+                  const grossProfit = totalRevenue - totalExpenses;
+                  const margin = totalRevenue > 0 ? Math.round((grossProfit / totalRevenue) * 100) : 0;
+
+                  const row = (label, amount, opts = {}) => (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: opts.size || '0.9rem', color: opts.color || '#333', fontWeight: opts.bold ? 700 : 400, borderTop: opts.border ? '2px solid #e0e0e0' : 'none', marginTop: opts.border ? 8 : 0, paddingTop: opts.border ? 12 : 6 }}>
+                      <span>{label}</span>
+                      <span>{typeof amount === 'string' ? amount : formatCurrency(amount)}</span>
+                    </div>
+                  );
+
+                  return (
+                    <div>
+                      {/* Cost Breakdown */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 24 }}>
+                        {/* Our Costs */}
+                        <div style={{ padding: 16, background: '#FFF3E0', borderRadius: 10, border: '1px solid #FFE0B2' }}>
+                          <h4 style={{ margin: '0 0 12px', color: '#E65100', fontSize: '1rem' }}>💰 Our Costs</h4>
+                          {row('Material (our cost)', totalMaterialCost)}
+                          {totalOutsideCost > 0 && row('Outside Processing', totalOutsideCost)}
+                          {totalTransportCost > 0 && row('Transport (outside)', totalTransportCost)}
+                          {trucking > 0 && row('Trucking to Client', trucking)}
+                          {row('Total Expenses', totalExpenses, { bold: true, border: true, color: '#c62828' })}
+                        </div>
+
+                        {/* Client Pays */}
+                        <div style={{ padding: 16, background: '#E8F5E9', borderRadius: 10, border: '1px solid #C8E6C9' }}>
+                          <h4 style={{ margin: '0 0 12px', color: '#2e7d32', fontSize: '1rem' }}>💵 Client Pays</h4>
+                          {row('Material (with markup)', totalMaterialBilled)}
+                          {row('In-House Labor', totalLaborInHouse)}
+                          {totalOutsideBilled > 0 && row('Outside Processing (marked up)', totalOutsideBilled)}
+                          {totalTransportBilled > 0 && row('Transport (marked up)', totalTransportBilled)}
+                          {totalServicesCost > 0 && row('Fab Services / Shop Rate', totalServicesCost)}
+                          {trucking > 0 && row('Trucking', trucking)}
+                          {totals.discountAmt > 0 && row('Discount', -totals.discountAmt, { color: '#c62828' })}
+                          {totals.taxAmount > 0 && row('Tax', totals.taxAmount, { color: '#888' })}
+                          {row('Grand Total', totals.grandTotal, { bold: true, border: true, color: '#2e7d32' })}
+                        </div>
+                      </div>
+
+                      {/* Profitability */}
+                      <div style={{ padding: 20, background: margin >= 30 ? '#E8F5E9' : margin >= 15 ? '#FFFDE7' : '#FFEBEE', borderRadius: 10, border: `2px solid ${margin >= 30 ? '#66BB6A' : margin >= 15 ? '#FFF176' : '#EF5350'}`, textAlign: 'center' }}>
+                        <div style={{ fontSize: '0.9rem', color: '#555', marginBottom: 4 }}>Estimated Margin</div>
+                        <div style={{ fontSize: '2.5rem', fontWeight: 800, color: margin >= 30 ? '#2e7d32' : margin >= 15 ? '#F57F17' : '#c62828' }}>
+                          {margin}%
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'center', gap: 24, marginTop: 8 }}>
+                          <div>
+                            <div style={{ fontSize: '0.75rem', color: '#888' }}>Markup Profit</div>
+                            <div style={{ fontWeight: 700, color: '#2e7d32' }}>{formatCurrency(totalMarkupProfit)}</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: '0.75rem', color: '#888' }}>Labor Revenue</div>
+                            <div style={{ fontWeight: 700, color: '#1565c0' }}>{formatCurrency(totalLaborInHouse + totalServicesCost)}</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: '0.75rem', color: '#888' }}>Gross Profit</div>
+                            <div style={{ fontWeight: 700, color: grossProfit >= 0 ? '#2e7d32' : '#c62828' }}>{formatCurrency(grossProfit)}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Per-Part Breakdown Table */}
+                      {parts.length > 0 && (
+                        <div style={{ marginTop: 24 }}>
+                          <h4 style={{ marginBottom: 12, fontSize: '0.95rem' }}>Per-Part Breakdown</h4>
+                          <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                              <thead>
+                                <tr style={{ background: '#f5f5f5' }}>
+                                  <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '2px solid #ddd' }}>#</th>
+                                  <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '2px solid #ddd' }}>Part</th>
+                                  <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Qty</th>
+                                  <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Material</th>
+                                  <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Labor</th>
+                                  <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd' }}>Outside</th>
+                                  <th style={{ padding: '8px 12px', textAlign: 'right', borderBottom: '2px solid #ddd', fontWeight: 700 }}>Total</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {parts.sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0)).map(p => {
+                                  const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+                                  const qty = parseInt(p.quantity) || 1;
+                                  const mat = parseFloat(p.materialTotal) || 0;
+                                  const matMk = parseFloat(p.materialMarkupPercent) || 0;
+                                  const matBilled = Math.round(mat * (1 + matMk / 100) * 100) / 100;
+                                  const labor = parseFloat(p.laborTotal) || 0;
+                                  const opCost = parseFloat(p.outsideProcessingCost) || 0;
+                                  const opMk = parseFloat(p.outsideProcessingMarkupPercent) || 0;
+                                  const opBilled = Math.round(opCost * (1 + opMk / 100) * 100) / 100;
+                                  const total = parseFloat(p.partTotal) || 0;
+                                  const desc = fd._materialDescription || p.materialDescription || PART_TYPES[p.partType]?.label || p.partType;
+                                  return (
+                                    <tr key={p.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                                      <td style={{ padding: '8px 12px', fontWeight: 600 }}>{p.partNumber}</td>
+                                      <td style={{ padding: '8px 12px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</td>
+                                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{qty}</td>
+                                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{matBilled > 0 ? `$${(matBilled * qty).toFixed(2)}` : '—'}</td>
+                                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{labor > 0 ? `$${(labor * qty).toFixed(2)}` : '—'}</td>
+                                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{opBilled > 0 ? `$${(opBilled * qty).toFixed(2)}` : '—'}</td>
+                                      <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700 }}>${total.toFixed(2)}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Summary Sidebar */}
+        {/* Summary Sidebar — only on Parts tab */}
+        {(estimateTab === 'parts' || isNew) && (
         <div>
           <div className="card" style={{ position: 'sticky', top: 24 }}>
             <h3 className="card-title" style={{ marginBottom: 16 }}>Estimate Summary</h3>
@@ -2346,6 +3005,7 @@ function EstimateDetailsPage() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* Part Type Picker Modal */}
@@ -2405,12 +3065,6 @@ function EstimateDetailsPage() {
                 <div className="form-group">
                   <HeatNumberInput partData={partData} setPartData={setPartData} />
                 </div>
-                <div className="form-group">
-                  <label className="form-label">Cut File Reference</label>
-                  <input type="text" className="form-input" value={partData.cutFileReference || ''}
-                    onChange={(e) => setPartData({ ...partData, cutFileReference: e.target.value })}
-                    placeholder="e.g. Part2_cutout.dxf" />
-                </div>
               </div>
               )}
 
@@ -2431,6 +3085,19 @@ function EstimateDetailsPage() {
               ) : partData.partType === 'plate_roll' ? (
                 <div className="grid grid-2">
                   <PlateRollForm
+                    partData={partData}
+                    setPartData={setPartData}
+                    vendorSuggestions={vendorSuggestions}
+                    setVendorSuggestions={setVendorSuggestions}
+                    showVendorSuggestions={showVendorSuggestions}
+                    setShowVendorSuggestions={setShowVendorSuggestions}
+                    showMessage={showMessage}
+                    setError={setError}
+                  />
+                </div>
+              ) : partData.partType === 'shaped_plate' ? (
+                <div className="grid grid-2">
+                  <ShapedPlateForm
                     partData={partData}
                     setPartData={setPartData}
                     vendorSuggestions={vendorSuggestions}
@@ -2682,6 +3349,77 @@ function EstimateDetailsPage() {
               )}
             </div>
 
+            {/* DXF/Cut File Upload — inside Material section */}
+            <div style={{ margin: '0 20px 12px', padding: 12, background: '#f5f5f5', borderRadius: 8 }}>
+              <label className="form-label" style={{ marginBottom: 8 }}>📐 Cut File (DXF/STEP) <span style={{ fontWeight: 400, color: '#999' }}>— attached to RFQs and POs</span></label>
+              {/* Show existing cut file */}
+              {partData.cutFileReference && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, padding: '6px 10px', background: 'white', borderRadius: 6, border: '1px solid #ddd' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#1565c0' }}>📄 {partData.cutFileReference}</span>
+                  <button onClick={() => setPartData({ ...partData, cutFileReference: '' })}
+                    style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#c62828', cursor: 'pointer', fontSize: '0.8rem' }}>✕ Remove</button>
+                </div>
+              )}
+              {/* Show uploaded DXF files for this part */}
+              {editingPart && editingPart.files && editingPart.files.filter(f => f.fileType === 'cut_file' || (f.originalName || '').match(/\.(dxf|step|stp)$/i)).length > 0 && (
+                <div style={{ marginBottom: 8 }}>
+                  {editingPart.files.filter(f => f.fileType === 'cut_file' || (f.originalName || '').match(/\.(dxf|step|stp)$/i)).map(f => (
+                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px', background: '#E3F2FD', borderRadius: 4, marginBottom: 4, fontSize: '0.85rem' }}>
+                      <span style={{ color: '#1565c0', fontWeight: 600 }}>📐 {f.originalName}</span>
+                      <button onClick={() => handleViewPartFile(editingPart.id, f)}
+                        style={{ background: 'none', border: 'none', color: '#1565c0', cursor: 'pointer', fontSize: '0.8rem' }}>View</button>
+                      <button onClick={async () => {
+                        try {
+                          await deleteEstimatePartFile(id, editingPart.id, f.id);
+                          await loadEstimate();
+                          showMessage('File deleted');
+                        } catch { setError('Failed to delete file'); }
+                      }} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#c62828', cursor: 'pointer', fontSize: '0.8rem' }}>Delete</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Upload button */}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 14px', background: 'white', border: '1px solid #1565c0', borderRadius: 6, color: '#1565c0', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}>
+                  📎 Upload DXF/STEP
+                  <input type="file" accept=".dxf,.step,.stp,.DXF,.STEP,.STP" hidden
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      // Set the filename as reference
+                      setPartData(prev => ({ ...prev, cutFileReference: file.name }));
+                      // If editing existing part, upload immediately
+                      if (editingPart) {
+                        try {
+                          await uploadEstimatePartFile(id, editingPart.id, [file], 'cut_file');
+                          await loadEstimate();
+                          showMessage(`Uploaded ${file.name}`);
+                        } catch (err) { setError('Failed to upload file'); }
+                      } else {
+                        showMessage(`${file.name} will be uploaded when part is saved`);
+                      }
+                      e.target.value = '';
+                    }} />
+                </label>
+                {!editingPart && partData.cutFileReference && (
+                  <span style={{ fontSize: '0.75rem', color: '#ff9800' }}>⚠ Save part first to upload file</span>
+                )}
+              </div>
+            </div>
+
+            {/* Outside Processing — available on all part types except fab_service/shop_rate/rush_service */}
+            {!['fab_service', 'shop_rate', 'rush_service'].includes(partData.partType) && (
+              <div style={{ margin: '0 20px 12px' }}>
+                <OutsideProcessingSection
+                  partData={partData}
+                  setPartData={setPartData}
+                  showMessage={showMessage}
+                  setError={setError}
+                />
+              </div>
+            )}
+
             <h4 style={{ margin: '20px 0 12px', borderBottom: '1px solid #eee', paddingBottom: 8 }}>🔄 Rolling</h4>
             <div className="grid grid-2">
               <div className="form-group">
@@ -2851,14 +3589,6 @@ function EstimateDetailsPage() {
               )}
             </div>
 
-            {/* Cut File Reference — always visible for all part types */}
-            <div style={{ margin: '0 20px 12px', padding: '12px 0', borderTop: '1px solid #eee' }}>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">📐 Cut File Reference <span style={{ fontWeight: 400, color: '#999' }}>(DXF/STEP filename to send to vendor)</span></label>
-                <input type="text" className="form-input" value={partData.cutFileReference || ''} onChange={(e) => setPartData({ ...partData, cutFileReference: e.target.value })} placeholder="e.g. Part2_cutout.dxf — will appear on purchase order" />
-              </div>
-            </div>
-
             {partFormError && (
               <div style={{ margin: '0 20px 12px', padding: 12, background: '#fff3e0', border: '2px solid #ff9800', borderRadius: 8 }}>
                 <div style={{ fontWeight: 700, color: '#e65100', marginBottom: 6, fontSize: '0.9rem' }}>⚠️ Please fix the following:</div>
@@ -3019,6 +3749,337 @@ function EstimateDetailsPage() {
               >
                 <Package size={18} />
                 {converting ? 'Converting...' : `Create Work Order (DR-${useCustomDR ? (customDR || '?') : (nextDR || '...')})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Document Parser Modal */}
+      {showAiParseModal && (
+        <div className="modal-overlay" onClick={() => !aiParsing && setShowAiParseModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 700 }}>
+            <div className="modal-header">
+              <h3>🤖 Upload Document to AI</h3>
+              <button className="btn btn-icon" onClick={() => !aiParsing && setShowAiParseModal(false)}><X size={20} /></button>
+            </div>
+            <div style={{ padding: '16px 20px', maxHeight: '70vh', overflowY: 'auto' }}>
+              {!aiParseResults ? (
+                <div>
+                  <p style={{ color: '#555', marginBottom: 16 }}>
+                    Upload a drawing, RFQ, spec sheet, or any document and the AI will read it and extract parts to add to this estimate.
+                  </p>
+                  
+                  {/* File upload area */}
+                  <label style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    padding: 32, border: '2px dashed #00838f', borderRadius: 12, cursor: aiParsing ? 'wait' : 'pointer',
+                    background: '#e0f7fa', minHeight: 120, transition: 'all 0.2s'
+                  }}>
+                    {aiParsing ? (
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: '2rem', marginBottom: 8 }}>🔄</div>
+                        <div style={{ fontWeight: 700, color: '#00838f', fontSize: '1.1rem' }}>AI is reading your document...</div>
+                        <div style={{ color: '#888', fontSize: '0.85rem', marginTop: 4 }}>This may take 15-30 seconds</div>
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: '2.5rem', marginBottom: 8 }}>📄</div>
+                        <div style={{ fontWeight: 600, color: '#00838f', fontSize: '1rem' }}>Click to upload PDF, Image, or Drawing</div>
+                        <div style={{ color: '#888', fontSize: '0.8rem', marginTop: 4 }}>PDF, PNG, JPG — max 50MB</div>
+                      </>
+                    )}
+                    <input type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp" hidden disabled={aiParsing}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        try {
+                          setAiParsing(true);
+                          const res = await aiParseDocument(id, file, aiParseNotes);
+                          setAiParseResults(res.data.data);
+                        } catch (err) {
+                          setError(err.response?.data?.error?.message || 'AI parsing failed. Please try again.');
+                          setShowAiParseModal(false);
+                        } finally {
+                          setAiParsing(false);
+                          e.target.value = '';
+                        }
+                      }} />
+                  </label>
+
+                  {/* Optional notes */}
+                  <div className="form-group" style={{ marginTop: 16 }}>
+                    <label className="form-label">Additional context for AI <span style={{ color: '#999', fontWeight: 400 }}>(optional)</span></label>
+                    <textarea className="form-textarea" value={aiParseNotes} onChange={(e) => setAiParseNotes(e.target.value)}
+                      rows={2} placeholder='e.g. "These are all A36 material", "Client wants everything rolled to 48" OD", "Ignore the header row"' />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {/* Results */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: '1.1rem', color: '#00838f' }}>
+                        🤖 Found {aiParseResults.parts?.length || 0} parts
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#888' }}>
+                        from {aiParseResults.fileName} • {aiParseResults.documentType || 'document'}
+                      </div>
+                    </div>
+                    <button className="btn btn-sm btn-outline" onClick={() => setAiParseResults(null)}>
+                      ← Upload Another
+                    </button>
+                  </div>
+
+                  {aiParseResults.aiNotes && (
+                    <div style={{ padding: 10, background: '#FFF8E1', borderRadius: 6, marginBottom: 12, fontSize: '0.85rem', color: '#f57f17' }}>
+                      💡 {aiParseResults.aiNotes}
+                    </div>
+                  )}
+
+                  {/* Parts list */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 400, overflowY: 'auto' }}>
+                    {(aiParseResults.parts || []).map((p, i) => {
+                      const typeLabel = PART_TYPES[p.partType]?.label || p.partType;
+                      const typeIcon = PART_TYPES[p.partType]?.icon || '📦';
+                      return (
+                        <div key={i} style={{
+                          padding: 12, borderRadius: 8, border: '1px solid #e0e0e0',
+                          background: p.missingFields?.length > 0 ? '#FFF8E1' : '#f9f9f9'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                            <div>
+                              <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                                {typeIcon} Part #{p.partNumber} — {typeLabel}
+                              </span>
+                              <span style={{ marginLeft: 8, color: '#666', fontSize: '0.85rem' }}>Qty: {p.quantity || 1}</span>
+                            </div>
+                          </div>
+                          <div style={{ fontSize: '0.85rem', color: '#555', marginTop: 4 }}>
+                            {p.description || p.formData?._materialDescription || 'No description'}
+                          </div>
+                          {p.specialInstructions && (
+                            <div style={{ fontSize: '0.8rem', color: '#1565c0', marginTop: 2 }}>
+                              📝 {p.specialInstructions}
+                            </div>
+                          )}
+                          {p.missingFields?.length > 0 && (
+                            <div style={{ fontSize: '0.75rem', color: '#e65100', marginTop: 4 }}>
+                              ⚠ Missing: {p.missingFieldNotes || p.missingFields.join(', ')}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {aiParseResults.notes && (
+                    <div style={{ padding: 10, background: '#f5f5f5', borderRadius: 6, marginTop: 12, fontSize: '0.85rem' }}>
+                      <strong>Notes:</strong> {aiParseResults.notes}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => !aiParsing && setShowAiParseModal(false)} disabled={aiParsing}>Cancel</button>
+              {aiParseResults && aiParseResults.parts?.length > 0 && (
+                <button className="btn" disabled={aiAddingParts}
+                  onClick={async () => {
+                    try {
+                      setAiAddingParts(true);
+                      // Add each part to the estimate
+                      for (const p of aiParseResults.parts) {
+                        const partPayload = {
+                          partNumber: p.partNumber,
+                          partType: p.partType || 'plate_roll',
+                          quantity: parseInt(p.quantity) || 1,
+                          material: p.material || '',
+                          thickness: p.thickness || '',
+                          width: p.width || '',
+                          length: p.length || '',
+                          outerDiameter: p.outerDiameter || '',
+                          wallThickness: p.wallThickness || '',
+                          sectionSize: p.sectionSize || '',
+                          radius: p.radius || '',
+                          diameter: p.diameter || p.outerDiameter || '',
+                          arcDegrees: p.arcDegrees || '',
+                          rollType: p.rollType || '',
+                          flangeOut: p.flangeOut || false,
+                          specialInstructions: p.specialInstructions || '',
+                          clientPartNumber: p.clientPartNumber || '',
+                          materialDescription: p.description || '',
+                          materialSource: p.materialSource || 'customer_supplied',
+                          formData: p.formData || {}
+                        };
+                        await addEstimatePart(id, partPayload);
+                      }
+                      showMessage(`Added ${aiParseResults.parts.length} parts from AI`);
+                      if (aiParseResults.notes && !formData.projectDescription) {
+                        setFormData(prev => ({ ...prev, projectDescription: aiParseResults.notes }));
+                      }
+                      setShowAiParseModal(false);
+                      await loadEstimate();
+                    } catch (err) {
+                      setError('Failed to add parts: ' + (err.response?.data?.error?.message || err.message));
+                    } finally {
+                      setAiAddingParts(false);
+                    }
+                  }}
+                  style={{ background: '#00838f', color: 'white' }}>
+                  {aiAddingParts ? '⏳ Adding...' : `✅ Add ${aiParseResults.parts.length} Parts to Estimate`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Vendor RFQ Modal */}
+      {showRfqModal && (
+        <div className="modal-overlay" onClick={() => setShowRfqModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 600 }}>
+            <div className="modal-header">
+              <h3>📤 Send RFQ to Vendor</h3>
+              <button className="btn btn-icon" onClick={() => setShowRfqModal(false)}><X size={20} /></button>
+            </div>
+            <div style={{ padding: '16px 20px', maxHeight: '70vh', overflowY: 'auto' }}>
+              {/* Vendor Search */}
+              {!rfqSelectedVendor ? (
+                <div>
+                  <label className="form-label">Select Vendor</label>
+                  <input className="form-input" value={rfqVendorSearch} placeholder="Search vendors..."
+                    onChange={async (e) => {
+                      setRfqVendorSearch(e.target.value);
+                      if (e.target.value.length >= 2) {
+                        try {
+                          const res = await searchVendors(e.target.value);
+                          setRfqVendorResults(res.data.data || []);
+                        } catch { setRfqVendorResults([]); }
+                      } else { setRfqVendorResults([]); }
+                    }} autoFocus />
+                  {rfqVendorResults.length > 0 && (
+                    <div style={{ border: '1px solid #ddd', borderRadius: 6, marginTop: 4, maxHeight: 200, overflowY: 'auto' }}>
+                      {rfqVendorResults.map(v => (
+                        <div key={v.id} onClick={async () => {
+                          setRfqSelectedVendor(v);
+                          setRfqVendorResults([]);
+                          // Load contacts
+                          try {
+                            const cRes = await getVendorContacts(v.id);
+                            const contacts = cRes.data.data || [];
+                            setRfqContacts(contacts);
+                            if (contacts.length > 0) setRfqSelectedEmail(contacts[0].email);
+                          } catch { setRfqContacts([]); }
+                        }} style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between' }}>
+                          <span style={{ fontWeight: 600 }}>{v.name}</span>
+                          <span style={{ color: '#888', fontSize: '0.85rem' }}>{v.contactEmail || ''}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  {/* Selected vendor */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, padding: '10px 14px', background: '#E8F5E9', borderRadius: 8 }}>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>{rfqSelectedVendor.name}</div>
+                      {rfqSelectedVendor.contactName && <div style={{ fontSize: '0.85rem', color: '#666' }}>{rfqSelectedVendor.contactName}</div>}
+                    </div>
+                    <button onClick={() => { setRfqSelectedVendor(null); setRfqVendorSearch(''); }} 
+                      style={{ background: 'none', border: 'none', color: '#1565c0', cursor: 'pointer', fontSize: '0.85rem' }}>Change</button>
+                  </div>
+
+                  {/* Contact picker */}
+                  <div className="form-group">
+                    <label className="form-label">Send To</label>
+                    {rfqContacts.length > 1 ? (
+                      <select className="form-select" value={rfqSelectedEmail} onChange={e => setRfqSelectedEmail(e.target.value)}>
+                        {rfqContacts.map((c, i) => (
+                          <option key={i} value={c.email}>{c.name ? `${c.name} — ${c.email}` : c.email}</option>
+                        ))}
+                      </select>
+                    ) : rfqContacts.length === 1 ? (
+                      <div style={{ padding: '8px 12px', background: '#f5f5f5', borderRadius: 6, fontSize: '0.9rem' }}>
+                        {rfqContacts[0].name ? `${rfqContacts[0].name} — ` : ''}{rfqContacts[0].email}
+                      </div>
+                    ) : (
+                      <input className="form-input" value={rfqSelectedEmail} onChange={e => setRfqSelectedEmail(e.target.value)}
+                        placeholder="vendor@company.com" />
+                    )}
+                  </div>
+
+                  {/* Part selection */}
+                  <div className="form-group">
+                    <label className="form-label">Parts to include in RFQ</label>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 200, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 6, padding: 8 }}>
+                      {parts.filter(p => !['fab_service', 'shop_rate'].includes(p.partType)).map(p => {
+                        const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+                        const desc = fd._materialDescription || p.materialDescription || `Part #${p.partNumber}`;
+                        const checked = rfqSelectedParts.includes(p.id);
+                        const isVendorMatch = rfqSelectedVendor && (p.vendorId === rfqSelectedVendor.id || (p.supplierName || '').toLowerCase() === (rfqSelectedVendor.name || '').toLowerCase());
+                        const otherVendor = p.supplierName && !isVendorMatch ? p.supplierName : null;
+                        return (
+                          <label key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 8px', cursor: 'pointer', background: checked ? '#E3F2FD' : 'transparent', borderRadius: 4, borderLeft: isVendorMatch ? '3px solid #2e7d32' : otherVendor ? '3px solid #ff9800' : '3px solid transparent' }}>
+                            <input type="checkbox" checked={checked}
+                              onChange={() => setRfqSelectedParts(prev => checked ? prev.filter(x => x !== p.id) : [...prev, p.id])}
+                              style={{ marginTop: 3, accentColor: '#1565c0' }} />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>({p.quantity || 1}) {desc}</div>
+                              {isVendorMatch && <div style={{ fontSize: '0.7rem', color: '#2e7d32', fontWeight: 600 }}>✓ Assigned to this vendor</div>}
+                              {otherVendor && <div style={{ fontSize: '0.7rem', color: '#ff9800' }}>⚠ Assigned to: {otherVendor}</div>}
+                              {p.specialInstructions && <div style={{ fontSize: '0.75rem', color: '#888' }}>{p.specialInstructions}</div>}
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                      {rfqSelectedVendor && (
+                        <button onClick={() => {
+                          const vendorParts = parts.filter(p => !['fab_service', 'shop_rate'].includes(p.partType) && (p.vendorId === rfqSelectedVendor.id || (p.supplierName || '').toLowerCase() === (rfqSelectedVendor.name || '').toLowerCase()));
+                          setRfqSelectedParts(vendorParts.length > 0 ? vendorParts.map(p => p.id) : parts.filter(p => !['fab_service', 'shop_rate'].includes(p.partType)).map(p => p.id));
+                        }} style={{ background: 'none', border: 'none', color: '#2e7d32', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>Select Vendor's Parts</button>
+                      )}
+                      <button onClick={() => setRfqSelectedParts(parts.filter(p => !['fab_service', 'shop_rate'].includes(p.partType)).map(p => p.id))}
+                        style={{ background: 'none', border: 'none', color: '#1565c0', cursor: 'pointer', fontSize: '0.8rem' }}>Select All</button>
+                      <button onClick={() => setRfqSelectedParts([])}
+                        style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '0.8rem' }}>Clear</button>
+                    </div>
+                  </div>
+
+                  {/* Subject preview */}
+                  <div style={{ padding: '8px 12px', background: '#FFFDE7', borderRadius: 6, fontSize: '0.85rem', marginBottom: 16 }}>
+                    <strong>Subject:</strong> RFQ-{estimate?.estimateNumber || 'EST-XXXXX'}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowRfqModal(false)}>Cancel</button>
+              <button className="btn" disabled={!rfqSelectedVendor || !rfqSelectedEmail || rfqSelectedParts.length === 0 || rfqSending}
+                onClick={async () => {
+                  try {
+                    setRfqSending(true);
+                    const res = await sendVendorRfq(id, {
+                      vendorId: rfqSelectedVendor.id,
+                      contactEmail: rfqSelectedEmail,
+                      partIds: rfqSelectedParts
+                    });
+                    const draftUrl = res.data.data?.draftUrl;
+                    setShowRfqModal(false);
+                    if (draftUrl) {
+                      window.open(draftUrl, '_blank');
+                      showMessage('RFQ draft created — review and send in Gmail');
+                    }
+                    await loadEstimate();
+                  } catch (err) {
+                    setError(err.response?.data?.error?.message || 'Failed to create RFQ');
+                  } finally { setRfqSending(false); }
+                }}
+                style={{ background: '#7B1FA2', color: 'white' }}>
+                {rfqSending ? '⏳ Creating...' : `📤 Create RFQ Draft (${rfqSelectedParts.length} parts)`}
               </button>
             </div>
           </div>

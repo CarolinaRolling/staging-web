@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import QRCode from 'qrcode';
 import { 
   Users, Activity, Plus, Trash2, Edit, Save, X, 
   Shield, User, Clock, ChevronLeft, ChevronRight, Key, Check, AlertTriangle, RefreshCw,
   Mail, Send, DollarSign
 } from 'lucide-react';
-import { getUsers, createUser, updateUser, deleteUser, getActivityLogs, getScheduleEmailSettings, updateScheduleEmailSettings, sendScheduleEmailNow, getSettings, updateSettings, getPrinterConfig, updatePrinterConfig, startBatchVerification, getBatchStatus, downloadResaleReport, getApiKeys, getApiKeySetupQR, createApiKey, updateApiKey, revokeApiKey, deleteApiKeyPermanent, getApprovedIPs, updateApprovedIPs, setup2FA, verify2FA, disable2FA, get2FAStatus } from '../services/api';
+import { getUsers, createUser, updateUser, deleteUser, getActivityLogs, getScheduleEmailSettings, updateScheduleEmailSettings, sendScheduleEmailNow, getSettings, updateSettings, getPrinterConfig, updatePrinterConfig, startBatchVerification, getBatchStatus, downloadResaleReport, getApiKeys, getApiKeySetupQR, createApiKey, updateApiKey, revokeApiKey, deleteApiKeyPermanent, getApprovedIPs, updateApprovedIPs, setup2FA, verify2FA, disable2FA, get2FAStatus, getScrapConfig, updateScrapConfig, getScrapLog, requestScrapPickup, confirmScrapPickup, getEmailScannerStatus, getEmailScannerAccounts, startGmailOAuth, disconnectGmailAccount, toggleGmailAccount, triggerEmailScan, getEmailScanHistory, getMonitoredClients, retryScannedEmail, deleteScannedEmail, getGeneralParsingNotes, updateGeneralParsingNotes } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 // Global error log for NAS uploads
@@ -33,10 +34,15 @@ function AdminPage({ section = 'users-logs' }) {
   // Tab groups by section
   const SECTION_TABS = {
     'users-logs': ['users', 'logs', 'schedule', 'apikeys', 'system'],
-    'shop-config': ['tax', 'minimums', 'rolllimits', 'mandreldies', 'grades', 'weldrates', 'printer']
+    'shop-config': ['tax', 'minimums', 'rolllimits', 'mandreldies', 'grades', 'weldrates', 'printer', 'scrap', 'emailscanner']
   };
   const allowedTabs = SECTION_TABS[section] || SECTION_TABS['users-logs'];
-  const [activeTab, setActiveTab] = useState(allowedTabs[0]);
+  const [activeTab, setActiveTab] = useState(() => {
+    // Check URL params for OAuth redirect
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('tab') === 'emailScanner') return 'emailscanner';
+    return allowedTabs[0];
+  });
   const [users, setUsers] = useState([]);
   const [logs, setLogs] = useState([]);
   const [logsTotal, setLogsTotal] = useState(0);
@@ -112,6 +118,16 @@ function AdminPage({ section = 'users-logs' }) {
   const [approvedIPs, setApprovedIPs] = useState([]);
   const [newIP, setNewIP] = useState('');
   const [printerConfig, setPrinterConfig] = useState({ qrPrinterIp: '', qrLabelType: 'CONTINUOUS_29', qrLabelLengthMm: 25, partPrinterIp: '', partLabelType: 'DK_11202_62x100' });
+  const [scrapConfig, setScrapConfig] = useState({ scrapEmail: '', shopAddress: '', shopName: 'Carolina Rolling Co. Inc.' });
+  const [scrapLog, setScrapLog] = useState([]);
+  const [scannerStatus, setScannerStatus] = useState(null);
+  const [scannerAccounts, setScannerAccounts] = useState([]);
+  const [scannerHistory, setScannerHistory] = useState([]);
+  const [monitoredClients, setMonitoredClients] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [showGeneralNotes, setShowGeneralNotes] = useState(false);
+  const [generalNotes, setGeneralNotes] = useState('');
+  const [codOverridePasswordAdmin, setCodOverridePasswordAdmin] = useState('');
 
   // Two-Factor Auth
   const [twoFAState, setTwoFAState] = useState({ enabled: false, setupData: null, verifyCode: '', disablePassword: '' });
@@ -153,13 +169,37 @@ function AdminPage({ section = 'users-logs' }) {
       get2FAStatus().then(resp => {
         setTwoFAState(prev => ({ ...prev, enabled: resp.data.data.enabled }));
       }).catch(() => {});
+      getSettings('cod_override_password').then(resp => {
+        if (resp.data.data?.value) setCodOverridePasswordAdmin(resp.data.data.value);
+      }).catch(() => {});
       setLoading(false);
     } else if (activeTab === 'apikeys') {
       loadApiKeys();
     } else if (activeTab === 'printer') {
       loadPrinterConfig();
+    } else if (activeTab === 'scrap') {
+      loadScrapConfig();
+    } else if (activeTab === 'emailscanner') {
+      loadEmailScanner();
     }
   }, [activeTab, logsPage]);
+
+  // Render scrap QR codes when tab is active
+  useEffect(() => {
+    if (activeTab === 'scrap') {
+      setTimeout(() => {
+        ['steel', 'stainless'].forEach(type => {
+          const code = type === 'steel' ? 'SCRAP-STEEL' : 'SCRAP-STAINLESS';
+          const canvas = document.getElementById(`scrap-qr-${type}`);
+          if (canvas) {
+            QRCode.toCanvas(canvas, code, { width: 250, margin: 2, errorCorrectionLevel: 'H' }, (err) => {
+              if (err) console.error('QR error:', err);
+            });
+          }
+        });
+      }, 200);
+    }
+  }, [activeTab, loading]);
 
   const loadTaxSettings = async () => {
     try {
@@ -555,6 +595,117 @@ function AdminPage({ section = 'users-logs' }) {
     }
   };
 
+  const loadScrapConfig = async () => {
+    try {
+      setLoading(true);
+      const [configRes, logRes] = await Promise.all([getScrapConfig(), getScrapLog()]);
+      setScrapConfig(configRes.data.data || { scrapEmail: '', shopAddress: '', shopName: 'Carolina Rolling Co. Inc.' });
+      setScrapLog(logRes.data.data || []);
+    } catch (err) {
+      setScrapConfig({ scrapEmail: '', shopAddress: '', shopName: 'Carolina Rolling Co. Inc.' });
+      setScrapLog([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveScrapConfig = async () => {
+    try {
+      setSaving(true);
+      await updateScrapConfig(scrapConfig);
+      setSuccess('Scrap configuration saved');
+    } catch (err) {
+      setError('Failed to save scrap config');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRequestScrapPickup = async (scrapType) => {
+    if (!window.confirm(`Send scrap pickup request for ${scrapType === 'steel' ? 'Steel' : 'Stainless & Aluminum'}?\n\nAn email will be sent to the scrap company.`)) return;
+    try {
+      setSaving(true);
+      const res = await requestScrapPickup(scrapType);
+      setSuccess(res.data.message || 'Pickup request sent');
+      loadScrapConfig(); // Refresh log
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to send scrap request');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Email Scanner functions
+  const loadEmailScanner = async () => {
+    try {
+      setLoading(true);
+      const [statusRes, accountsRes, historyRes, clientsRes, notesRes] = await Promise.all([
+        getEmailScannerStatus().catch(() => ({ data: { data: null } })),
+        getEmailScannerAccounts().catch(() => ({ data: { data: [] } })),
+        getEmailScanHistory().catch(() => ({ data: { data: [] } })),
+        getMonitoredClients().catch(() => ({ data: { data: [] } })),
+        getGeneralParsingNotes().catch(() => ({ data: { data: '' } }))
+      ]);
+      setScannerStatus(statusRes.data.data);
+      setScannerAccounts(accountsRes.data.data || []);
+      setScannerHistory(historyRes.data.data || []);
+      setMonitoredClients(clientsRes.data.data || []);
+      setGeneralNotes(notesRes.data.data || '');
+    } catch (err) {
+      setError('Failed to load email scanner data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConnectGmail = async () => {
+    try {
+      const res = await startGmailOAuth();
+      const authUrl = res.data.data?.authUrl;
+      if (authUrl) {
+        window.location.href = authUrl;
+      } else {
+        setError('Failed to get OAuth URL');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to start OAuth. Check Google credentials in env vars.');
+    }
+  };
+
+  const handleDisconnectGmail = async (account) => {
+    if (!window.confirm(`Disconnect ${account.email}? The scanner will stop checking this account.`)) return;
+    try {
+      await disconnectGmailAccount(account.id);
+      setSuccess(`${account.email} disconnected`);
+      loadEmailScanner();
+    } catch (err) { setError('Failed to disconnect'); }
+  };
+
+  const handleToggleGmail = async (account) => {
+    try {
+      await toggleGmailAccount(account.id);
+      loadEmailScanner();
+    } catch (err) { setError('Failed to toggle'); }
+  };
+
+  const handleScanNow = async (hoursBack = 0) => {
+    try {
+      setScanning(true);
+      const res = await triggerEmailScan(hoursBack);
+      const r = res.data.data || {};
+      if (r.skipped) {
+        setSuccess(`Scan skipped: ${r.reason}`);
+      } else {
+        setSuccess(`Scan complete: ${r.processed || 0} emails processed, ${r.estimates || 0} estimates, ${r.pendingOrders || 0} pending orders`);
+      }
+      loadEmailScanner();
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Scan failed');
+    } finally {
+      setScanning(false);
+    }
+  };
+
   const handleCreateApiKey = async () => {
     if (!newApiKey.name.trim()) {
       setError('API key name is required');
@@ -776,6 +927,17 @@ function AdminPage({ section = 'users-logs' }) {
     }
   };
 
+  const handleToggleHeadEstimator = async (user) => {
+    try {
+      await updateUser(user.id, { isHeadEstimator: !user.isHeadEstimator });
+      await loadUsers();
+      setSuccess(`${user.username} ${user.isHeadEstimator ? 'removed as' : 'set as'} Head Estimator`);
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      setError('Failed to update user');
+    }
+  };
+
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
     return new Date(dateString).toLocaleString('en-US', {
@@ -819,6 +981,8 @@ function AdminPage({ section = 'users-logs' }) {
           <button className={`tab ${activeTab === 'grades' ? 'active' : ''}`} onClick={() => setActiveTab('grades')}>📊 Material Grades</button>
           <button className={`tab ${activeTab === 'weldrates' ? 'active' : ''}`} onClick={() => setActiveTab('weldrates')}>🔥 Weld Rates</button>
           <button className={`tab ${activeTab === 'printer' ? 'active' : ''}`} onClick={() => setActiveTab('printer')}>🖨️ Printer</button>
+          <button className={`tab ${activeTab === 'scrap' ? 'active' : ''}`} onClick={() => setActiveTab('scrap')}>♻️ Scrap</button>
+          <button className={`tab ${activeTab === 'emailscanner' ? 'active' : ''}`} onClick={() => setActiveTab('emailscanner')}>📧 Email Scanner</button>
         </>)}
         {section === 'users-logs' && (<>
           <button className={`tab ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
@@ -1452,6 +1616,21 @@ function AdminPage({ section = 'users-logs' }) {
                           <User size={16} color="#666" />
                         )}
                         <span style={{ fontWeight: 500 }}>{user.username}</span>
+                        {user.isHeadEstimator && (
+                          <span style={{ 
+                            fontSize: '0.7rem', 
+                            background: '#ff9800', 
+                            color: 'white',
+                            padding: '2px 8px',
+                            borderRadius: 10,
+                            fontWeight: 700,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 3
+                          }}>
+                            ⭐ Head Estimator
+                          </span>
+                        )}
                         {user.id === currentUser?.id && (
                           <span style={{ 
                             fontSize: '0.7rem', 
@@ -1471,13 +1650,28 @@ function AdminPage({ section = 'users-logs' }) {
                       </span>
                     </td>
                     <td>
-                      <button
-                        className={`btn btn-sm ${user.isActive ? 'btn-success' : 'btn-secondary'}`}
-                        onClick={() => handleToggleActive(user)}
-                        disabled={user.id === currentUser?.id}
-                      >
-                        {user.isActive ? 'Active' : 'Disabled'}
-                      </button>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          className={`btn btn-sm ${user.isActive ? 'btn-success' : 'btn-secondary'}`}
+                          onClick={() => handleToggleActive(user)}
+                          disabled={user.id === currentUser?.id}
+                        >
+                          {user.isActive ? 'Active' : 'Disabled'}
+                        </button>
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => handleToggleHeadEstimator(user)}
+                          title={user.isHeadEstimator ? 'Remove Head Estimator' : 'Set as Head Estimator'}
+                          style={{
+                            background: user.isHeadEstimator ? '#ff9800' : '#f5f5f5',
+                            color: user.isHeadEstimator ? 'white' : '#999',
+                            border: `1px solid ${user.isHeadEstimator ? '#ff9800' : '#ddd'}`,
+                            fontSize: '0.7rem'
+                          }}
+                        >
+                          📋 {user.isHeadEstimator ? 'Head Est.' : 'Set Est.'}
+                        </button>
+                      </div>
                     </td>
                     <td>{formatDate(user.createdAt)}</td>
                     <td>
@@ -1818,6 +2012,33 @@ function AdminPage({ section = 'users-logs' }) {
             )}
           </div>
 
+          {/* COD Override Password */}
+          <div className="card" style={{ marginBottom: 20 }}>
+            <h3 style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              💰 COD Override Password
+            </h3>
+            <p style={{ color: '#666', marginBottom: 12, fontSize: '0.85rem' }}>
+              When a COD client's order is ready for pickup, staff must confirm payment before printing a pickup checklist. 
+              This password allows an authorized override if pickup must proceed without payment confirmation.
+            </p>
+            <div style={{ display: 'flex', gap: 8, maxWidth: 400 }}>
+              <input type="text" className="form-input" placeholder="Set override password"
+                value={codOverridePasswordAdmin}
+                onChange={e => setCodOverridePasswordAdmin(e.target.value)} />
+              <button className="btn btn-primary" disabled={saving} onClick={async () => {
+                try {
+                  setSaving(true);
+                  await updateSettings('cod_override_password', codOverridePasswordAdmin);
+                  setSuccess('COD override password saved');
+                } catch (err) {
+                  setError('Failed to save override password');
+                } finally { setSaving(false); }
+              }}>
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+
           {/* System Logs */}
           <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
             <button className="btn btn-outline" onClick={refreshSystemLogs}>
@@ -2027,6 +2248,401 @@ function AdminPage({ section = 'users-logs' }) {
             <button className="btn btn-primary" onClick={handleSavePrinterConfig} disabled={saving} style={{ marginTop: 20 }}>
               {saving ? 'Saving...' : '💾 Save Printer Config'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'scrap' && !loading && (
+        <div>
+          <div className="card">
+            <h3 style={{ marginBottom: 16 }}>♻️ Scrap Pickup Configuration</h3>
+            <p style={{ color: '#666', marginBottom: 16, fontSize: '0.85rem' }}>
+              Configure scrap pickup requests. Print QR codes and stick them on your scrap bins. 
+              When an operator scans one, it emails the scrap company requesting a pickup.
+            </p>
+
+            <div className="form-group">
+              <label className="form-label">Scrap Company Email <span style={{ fontWeight: 400, color: '#888', fontSize: '0.8rem' }}>(Pickup request emails will be sent to this address)</span></label>
+              <input type="email" className="form-input" placeholder="scrap@metalrecycling.com" style={{ maxWidth: 400 }}
+                value={scrapConfig.scrapEmail} onChange={(e) => setScrapConfig({ ...scrapConfig, scrapEmail: e.target.value })} />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Shop Name</label>
+              <input type="text" className="form-input" placeholder="Carolina Rolling Co. Inc." style={{ maxWidth: 400 }}
+                value={scrapConfig.shopName} onChange={(e) => setScrapConfig({ ...scrapConfig, shopName: e.target.value })} />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Shop Address (included in pickup email)</label>
+              <textarea className="form-input" rows={3} placeholder="123 Industrial Blvd&#10;City, ST 12345" style={{ maxWidth: 400 }}
+                value={scrapConfig.shopAddress} onChange={(e) => setScrapConfig({ ...scrapConfig, shopAddress: e.target.value })} />
+            </div>
+
+            <button className="btn btn-primary" onClick={handleSaveScrapConfig} disabled={saving} style={{ marginBottom: 24 }}>
+              {saving ? 'Saving...' : '💾 Save Scrap Config'}
+            </button>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <h3 style={{ marginBottom: 16 }}>🏷️ Scrap Bin QR Codes</h3>
+            <p style={{ color: '#666', marginBottom: 16, fontSize: '0.85rem' }}>
+              Print these QR codes and label your scrap bins. When scanned on a tablet, it sends a pickup request email to the scrap company.
+            </p>
+
+            <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+              {[
+                { type: 'steel', label: '🔩 Steel Scrap', code: 'SCRAP-STEEL', color: '#795548', bg: '#EFEBE9', pendingKey: 'steelPending' },
+                { type: 'stainless', label: '✨ Stainless & Aluminum', code: 'SCRAP-STAINLESS', color: '#1565C0', bg: '#E3F2FD', pendingKey: 'stainlessPending' }
+              ].map(bin => {
+                const canvasId = `scrap-qr-${bin.type}`;
+                const pending = scrapConfig[bin.pendingKey];
+                return (
+                <div key={bin.type} style={{ border: '2px solid ' + bin.color, borderRadius: 12, padding: 20, textAlign: 'center', background: bin.bg, minWidth: 260 }}>
+                  <h4 style={{ marginBottom: 12, color: bin.color }}>{bin.label}</h4>
+
+                  {/* Pending pickup status */}
+                  {pending ? (
+                    <div style={{ background: '#FFF3E0', border: '2px solid #FFB74D', borderRadius: 8, padding: 12, marginBottom: 12, textAlign: 'left' }}>
+                      <div style={{ fontWeight: 700, color: '#E65100', fontSize: '0.9rem', marginBottom: 4 }}>⏳ Pickup Requested</div>
+                      <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                        {pending.requestedBy && <span>By: <strong>{pending.requestedBy}</strong></span>}
+                        {pending.requestedAt && <span> on {new Date(pending.requestedAt).toLocaleDateString()}</span>}
+                      </div>
+                      <button className="btn" style={{ marginTop: 8, background: '#388E3C', color: 'white', border: 'none', fontWeight: 700, width: '100%', padding: '10px' }} onClick={async () => {
+                        if (!window.confirm(`Confirm ${bin.label} has been picked up?`)) return;
+                        try {
+                          setSuccess(''); setError('');
+                          const res = await confirmScrapPickup(bin.type);
+                          setSuccess(res.data.message || 'Pickup confirmed!');
+                          loadScrapConfig();
+                        } catch (err) {
+                          setError(err.response?.data?.error?.message || 'Failed to confirm pickup');
+                        }
+                      }}>
+                        ✅ Confirm Picked Up
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ background: '#E8F5E9', borderRadius: 8, padding: 8, marginBottom: 12, fontSize: '0.8rem', color: '#2E7D32', fontWeight: 600 }}>
+                      ✅ Ready for new request
+                    </div>
+                  )}
+
+                  <div style={{ background: 'white', padding: 16, borderRadius: 8, display: 'inline-block', marginBottom: 12 }}>
+                    <canvas id={canvasId}></canvas>
+                  </div>
+                  <div style={{ fontFamily: 'monospace', fontSize: '0.85rem', color: '#666', marginBottom: 12 }}>{bin.code}</div>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+                    <button className="btn btn-outline" style={{ borderColor: bin.color, color: bin.color }} onClick={() => {
+                      const canvas = document.getElementById(canvasId);
+                      if (canvas) {
+                        const printWin = window.open('', '_blank');
+                        printWin.document.write('<html><head><title>Scrap Bin Label</title><style>body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;font-family:Arial}h1{font-size:28px;margin-bottom:20px}p{font-size:16px;color:#666;margin-top:12px}</style></head><body>');
+                        printWin.document.write('<h1>' + bin.label + '</h1>');
+                        printWin.document.write('<img src="' + canvas.toDataURL() + '" width="400" height="400"/>');
+                        printWin.document.write('<p>Scan to request pickup</p>');
+                        printWin.document.write('</body></html>');
+                        printWin.document.close();
+                        printWin.print();
+                      }
+                    }}>
+                      🖨️ Print Label
+                    </button>
+                    <button className="btn" style={{ background: pending ? '#ccc' : bin.color, color: 'white', border: 'none' }} disabled={!!pending} onClick={async () => {
+                      try {
+                        setSuccess(''); setError('');
+                        const res = await requestScrapPickup(bin.type);
+                        setSuccess(res.data.message || 'Pickup request sent!');
+                        loadScrapConfig();
+                      } catch (err) {
+                        setError(err.response?.data?.error?.message || 'Failed to send request');
+                      }
+                    }}>
+                      📧 Request Pickup
+                    </button>
+                  </div>
+                </div>
+              )})}
+            </div>
+          </div>
+
+          {scrapLog.length > 0 && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <h3 style={{ marginBottom: 12 }}>📋 Pickup Request Log</h3>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Type</th>
+                    <th>Action</th>
+                    <th>By</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scrapLog.map(entry => (
+                    <tr key={entry.id} style={entry.action === 'picked_up' ? { background: '#E8F5E9' } : {}}>
+                      <td style={{ fontSize: '0.85rem' }}>{new Date(entry.requestedAt).toLocaleString()}</td>
+                      <td>
+                        <span style={{
+                          padding: '2px 10px', borderRadius: 12, fontSize: '0.75rem', fontWeight: 600,
+                          background: entry.scrapType === 'steel' ? '#EFEBE9' : '#E3F2FD',
+                          color: entry.scrapType === 'steel' ? '#795548' : '#1565C0'
+                        }}>
+                          {entry.scrapLabel || (entry.scrapType === 'steel' ? 'Steel' : 'Stainless/Alum')}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: '0.85rem' }}>
+                        {entry.action === 'picked_up' ? (
+                          <span style={{ color: '#388E3C', fontWeight: 600 }}>✅ Pickup Confirmed</span>
+                        ) : (
+                          <span>📧 Requested → {entry.emailSentTo}</span>
+                        )}
+                      </td>
+                      <td style={{ fontSize: '0.85rem' }}>{entry.requestedBy}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ==================== EMAIL SCANNER TAB ==================== */}
+      {activeTab === 'emailscanner' && !loading && (
+        <div>
+          {/* Status Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 20 }}>
+            {[
+              { label: 'Connected Accounts', value: scannerStatus?.connectedAccounts || 0, color: '#1565C0', icon: '📬' },
+              { label: 'Monitored Emails', value: scannerStatus?.monitoredAddresses || 0, color: '#7B1FA2', icon: '👀' },
+              { label: 'Processed Today', value: scannerStatus?.emailsProcessedToday || 0, color: '#2E7D32', icon: '✅' },
+              { label: 'Pending Orders', value: scannerStatus?.pendingOrders || 0, color: '#E65100', icon: '⏳' }
+            ].map(card => (
+              <div key={card.label} className="card" style={{ textAlign: 'center', padding: '16px 12px' }}>
+                <div style={{ fontSize: '1.8rem', marginBottom: 4 }}>{card.icon}</div>
+                <div style={{ fontSize: '1.5rem', fontWeight: 700, color: card.color }}>{card.value}</div>
+                <div style={{ fontSize: '0.75rem', color: '#888', fontWeight: 600 }}>{card.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Config warnings */}
+          {!scannerStatus?.googleConfigured && (
+            <div className="alert alert-error" style={{ marginBottom: 12 }}>
+              Google OAuth not configured. Set <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> environment variables.
+            </div>
+          )}
+          {!scannerStatus?.anthropicConfigured && (
+            <div className="alert alert-error" style={{ marginBottom: 12 }}>
+              Anthropic API key not configured. Set <code>ANTHROPIC_API_KEY</code> environment variable for AI email parsing.
+            </div>
+          )}
+
+          {/* Connected Gmail Accounts */}
+          <div className="card" style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h3 style={{ margin: 0 }}>📬 Connected Gmail Accounts</h3>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn btn-primary" onClick={handleConnectGmail} disabled={!scannerStatus?.googleConfigured}>
+                  + Connect Gmail Account
+                </button>
+                <button className="btn" onClick={() => handleScanNow()} disabled={scanning || scannerAccounts.length === 0}
+                  style={{ background: '#E65100', color: 'white', border: 'none' }}>
+                  {scanning ? '⏳ Scanning...' : '🔍 Scan Now'}
+                </button>
+                <button className="btn btn-outline" onClick={() => handleScanNow(24)} disabled={scanning || scannerAccounts.length === 0}
+                  style={{ fontSize: '0.8rem' }}>
+                  🔄 Rescan 24h
+                </button>
+              </div>
+            </div>
+            {scannerAccounts.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 24, color: '#888' }}>
+                No Gmail accounts connected. Click "Connect Gmail Account" to start scanning emails.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {scannerAccounts.map(acct => (
+                  <div key={acct.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: acct.isActive ? '#E8F5E9' : '#f5f5f5', borderRadius: 8, border: `1px solid ${acct.isActive ? '#A5D6A7' : '#ddd'}` }}>
+                    <div>
+                      <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {acct.email}
+                        <span style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: 10, fontWeight: 600, background: acct.isActive ? '#C8E6C9' : '#eee', color: acct.isActive ? '#2E7D32' : '#888' }}>
+                          {acct.isActive ? 'Active' : 'Paused'}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#888', marginTop: 2 }}>
+                        {acct.lastScannedAt ? `Last scan: ${new Date(acct.lastScannedAt).toLocaleString()}` : 'Never scanned'}
+                        {acct.lastError && <span style={{ color: '#c62828', marginLeft: 8 }}>Error: {acct.lastError}</span>}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button className="btn btn-sm btn-outline" onClick={() => handleToggleGmail(acct)}
+                        style={{ fontSize: '0.8rem' }}>
+                        {acct.isActive ? '⏸️ Pause' : '▶️ Resume'}
+                      </button>
+                      <button className="btn btn-sm" onClick={() => handleDisconnectGmail(acct)}
+                        style={{ fontSize: '0.8rem', color: '#c62828', background: 'none', border: '1px solid #c62828' }}>
+                        Disconnect
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Monitored Clients */}
+          <div className="card" style={{ marginBottom: 20 }}>
+            <h3 style={{ marginBottom: 12 }}>👀 Monitored Clients</h3>
+            {monitoredClients.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 24, color: '#888' }}>
+                No clients have email scanning enabled. Go to <strong>Clients & Vendors</strong>, edit a client, and check "📧 Email Scanning".
+              </div>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Client</th>
+                    <th>Monitored Emails</th>
+                    <th>Parsing Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {monitoredClients.map(client => (
+                    <tr key={client.id}>
+                      <td style={{ fontWeight: 600 }}>{client.name}</td>
+                      <td>
+                        {(client.emailScanAddresses || []).map((addr, i) => (
+                          <span key={i} style={{ display: 'inline-block', background: '#E3F2FD', color: '#1565C0', padding: '2px 8px', borderRadius: 12, fontSize: '0.8rem', fontWeight: 500, marginRight: 6, marginBottom: 4 }}>
+                            {addr}
+                          </span>
+                        ))}
+                      </td>
+                      <td style={{ fontSize: '0.8rem', color: '#666', maxWidth: 300 }}>{client.emailScanParsingNotes || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Scan History */}
+          <div className="card">
+            <h3 style={{ marginBottom: 12 }}>📋 Recent Scan History</h3>
+            {scannerHistory.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 24, color: '#888' }}>
+                No emails have been scanned yet. Connect a Gmail account and enable client email scanning to get started.
+              </div>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>From</th>
+                    <th>Subject</th>
+                    <th>Type</th>
+                    <th>Confidence</th>
+                    <th>Status</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scannerHistory.map(email => {
+                    const statusColors = { estimate_created: '#2E7D32', pending_order: '#E65100', processed: '#1565C0', error: '#c62828', ignored: '#888' };
+                    return (
+                      <tr key={email.id}>
+                        <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>{new Date(email.createdAt).toLocaleString()}</td>
+                        <td>
+                          <div style={{ fontWeight: 500 }}>{email.fromName}</div>
+                          <div style={{ fontSize: '0.75rem', color: '#888' }}>{email.fromEmail}</div>
+                        </td>
+                        <td style={{ fontSize: '0.85rem', maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {email.gmailLink ? (
+                            <a href={email.gmailLink} target="_blank" rel="noopener noreferrer" style={{ color: '#1565C0' }}>{email.subject}</a>
+                          ) : email.subject}
+                        </td>
+                        <td>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 600, padding: '2px 8px', borderRadius: 10, background: email.emailType === 'po' ? '#FFF3E0' : '#E8F5E9', color: email.emailType === 'po' ? '#E65100' : '#2E7D32' }}>
+                            {email.emailType === 'po' ? 'PO' : email.emailType === 'rfq' ? 'RFQ' : '?'}
+                          </span>
+                        </td>
+                        <td>
+                          {email.parseConfidence && (
+                            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: email.parseConfidence === 'high' ? '#2E7D32' : email.parseConfidence === 'medium' ? '#F57C00' : '#c62828' }}>
+                              {email.parseConfidence}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span style={{ fontSize: '0.7rem', fontWeight: 600, padding: '2px 8px', borderRadius: 10, background: (statusColors[email.status] || '#888') + '18', color: statusColors[email.status] || '#888' }}>
+                            {(email.status || '').replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: '0.8rem' }}>
+                          {email.estimateId && <a href={`/estimates/${email.estimateId}`} style={{ color: '#1565C0', fontWeight: 600 }}>View Estimate</a>}
+                          {email.errorMessage && <span style={{ color: '#c62828', display: 'block', marginBottom: 4 }}>{email.errorMessage.substring(0, 60)}</span>}
+                          <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
+                            {(email.status === 'error' || email.status === 'processed') && (
+                              <button className="btn btn-sm" onClick={async () => {
+                                try {
+                                  setError(''); setSuccess('');
+                                  const res = await retryScannedEmail(email.id);
+                                  setSuccess(res.data.message || 'Retry successful');
+                                  loadEmailScanner();
+                                } catch (err) {
+                                  setError(err.response?.data?.error?.message || 'Retry failed');
+                                }
+                              }} style={{ fontSize: '0.7rem', padding: '2px 8px', background: '#E65100', color: 'white', border: 'none' }}>
+                                🔄 Retry
+                              </button>
+                            )}
+                            <button className="btn btn-sm" onClick={async () => {
+                              if (!window.confirm('Delete this scan record? The email will be picked up again on next scan.')) return;
+                              try {
+                                await deleteScannedEmail(email.id);
+                                loadEmailScanner();
+                              } catch (err) { setError('Failed to delete'); }
+                            }} style={{ fontSize: '0.7rem', padding: '2px 6px', background: 'none', border: '1px solid #ccc', color: '#888' }}>
+                              ✕
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* General AI Parsing Notes — collapsible at bottom */}
+          <div style={{ marginTop: 20 }}>
+            <button onClick={() => setShowGeneralNotes(!showGeneralNotes)}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', width: '100%', borderBottom: '2px solid #888' }}>
+              <span style={{ fontSize: '1rem', fontWeight: 700, color: '#888' }}>{showGeneralNotes ? '▼' : '▶'} 🧠 General AI Parsing Notes</span>
+            </button>
+            {showGeneralNotes && (
+              <div className="card" style={{ marginTop: 12 }}>
+                <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: 12 }}>
+                  These notes are sent to the AI for every email it parses. The AI already knows part types, dropdown options, abbreviations, and form fields. Use this to add shop-specific knowledge.
+                </p>
+                <textarea className="form-input" rows={12} value={generalNotes}
+                  onChange={(e) => setGeneralNotes(e.target.value)}
+                  placeholder="Add shop-specific knowledge here..."
+                  style={{ fontFamily: 'monospace', fontSize: '0.85rem', lineHeight: 1.5 }} />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                  <button className="btn btn-primary" onClick={async () => {
+                    try {
+                      await updateGeneralParsingNotes(generalNotes);
+                      setSuccess('General notes saved');
+                    } catch (err) { setError('Failed to save notes'); }
+                  }}>💾 Save Notes</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

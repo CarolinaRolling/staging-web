@@ -396,20 +396,29 @@ export default function PipeRollForm({ partData, setPartData, vendorSuggestions,
   // Auto-update quantity when complete rings changes
   useEffect(() => {
     if (completeRings && ringCalc && !ringCalc.error) {
+      const numRings = parseInt(ringsNeeded) || 1;
+      const matPerLength = parseFloat(partData._ringMaterialPerLength) || 0;
+      const laborPerUnit = parseFloat(partData._ringLaborPerUnit) || 0;
+      const totalMat = matPerLength * ringCalc.sticksNeeded;
+      const matPerRing = numRings > 0 ? totalMat / numRings : 0;
+      const totalLabor = ringCalc.multiSegment ? laborPerUnit * ringCalc.sticksNeeded : laborPerUnit * numRings;
+      const laborPerRing = numRings > 0 ? totalLabor / numRings : 0;
       setPartData(prev => ({
         ...prev,
-        quantity: String(parseInt(ringsNeeded) || 1),
+        quantity: String(numRings),
         _completeRings: true,
         _ringsNeeded: ringsNeeded,
         _tangentLength: tangentLength,
         _ringSticksNeeded: ringCalc.sticksNeeded,
         _ringRingsPerStick: ringCalc.ringsPerStick || 0,
         _ringMultiSegment: ringCalc.multiSegment || false,
+        materialTotal: matPerRing > 0 ? matPerRing.toFixed(2) : prev.materialTotal,
+        laborTotal: laborPerRing > 0 ? laborPerRing.toFixed(2) : prev.laborTotal,
       }));
     } else {
       setPartData(prev => ({ ...prev, _completeRings: false }));
     }
-  }, [completeRings, ringCalc, ringsNeeded, tangentLength]);
+  }, [completeRings, ringCalc, ringsNeeded, tangentLength, partData._ringMaterialPerLength, partData._ringLaborPerUnit]);
 
   // Build rolling description
   const rollingDescription = useMemo(() => {

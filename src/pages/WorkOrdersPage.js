@@ -11,7 +11,14 @@ function WorkOrdersPage() {
   const [error, setError] = useState(null);
   const [showNewModal, setShowNewModal] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(() => {
+    return sessionStorage.getItem('wo_search') || '';
+  });
+  const updateSearch = (val) => {
+    setSearchQuery(val);
+    if (val) sessionStorage.setItem('wo_search', val);
+    else sessionStorage.removeItem('wo_search');
+  };
   const [statusFilter, setStatusFilter] = useState(() => {
     return localStorage.getItem('workorders_statusFilter') || 'all';
   });
@@ -102,6 +109,17 @@ function WorkOrdersPage() {
     }, 400); // debounce
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  // Restore scroll position when returning from a WO detail page
+  useEffect(() => {
+    if (!loading && orders.length > 0) {
+      const savedScroll = sessionStorage.getItem('wo_scroll');
+      if (savedScroll) {
+        requestAnimationFrame(() => window.scrollTo(0, parseInt(savedScroll)));
+        sessionStorage.removeItem('wo_scroll');
+      }
+    }
+  }, [loading, orders.length]);
 
   const loadOrders = async (silent = false) => {
     try {
@@ -209,6 +227,7 @@ function WorkOrdersPage() {
       stored: { bg: '#e8f5e9', text: '#2e7d32', label: 'Stored' },
       shipped: { bg: '#f3e5f5', text: '#7b1fa2', label: 'Shipped' },
       archived: { bg: '#eceff1', text: '#546e7a', label: 'Archived' },
+      void: { bg: '#ffcdd2', text: '#b71c1c', label: '⛔ VOID' },
       // Legacy mappings
       draft: { bg: '#e3f2fd', text: '#1565c0', label: 'Received' },
       in_progress: { bg: '#e1f5fe', text: '#0288d1', label: 'Processing' },
@@ -289,7 +308,7 @@ function WorkOrdersPage() {
                 className="form-input"
                 placeholder="Search by client, DR#, PO#..."
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => updateSearch(e.target.value)}
                 style={{ paddingLeft: 40 }}
               />
             </div>
@@ -345,13 +364,14 @@ function WorkOrdersPage() {
             <div
               key={order.id}
               className="card"
-              onClick={() => navigate(`/workorders/${order.id}`)}
+              onClick={() => { sessionStorage.setItem('wo_scroll', window.scrollY); navigate(`/workorders/${order.id}`); }}
               style={{
                 cursor: 'pointer',
                 transition: 'transform 0.15s, box-shadow 0.15s',
-                background: isRush ? '#ffebee' : undefined,
-                border: isRush ? '2px solid #ef5350' : undefined,
-                borderLeft: isRush ? '4px solid #c62828' : `4px solid ${getStatusColor(order)}`,
+                background: order.isVoided ? '#fafafa' : isRush ? '#ffebee' : undefined,
+                border: order.isVoided ? '2px dashed #e0e0e0' : isRush ? '2px solid #ef5350' : undefined,
+                borderLeft: order.isVoided ? '4px solid #c62828' : isRush ? '4px solid #c62828' : `4px solid ${getStatusColor(order)}`,
+                opacity: order.isVoided ? 0.7 : 1,
               }}
               onMouseOver={(e) => {
                 e.currentTarget.style.transform = 'translateY(-2px)';
@@ -397,9 +417,16 @@ function WorkOrdersPage() {
                       🚨 RUSH
                     </span>
                   )}
-                  {getStatusBadge(order.status)}
+                  {getStatusBadge(order.isVoided ? 'void' : order.status)}
                 </div>
               </div>
+
+              {/* Void Banner */}
+              {order.isVoided && (
+                <div style={{ background: '#ffcdd2', padding: '4px 10px', borderRadius: 4, marginBottom: 8, fontSize: '0.8rem', color: '#b71c1c', fontWeight: 600 }}>
+                  ⛔ {order.voidReason || 'Voided'}
+                </div>
+              )}
 
               {/* Client PO */}
               {order.clientPurchaseOrderNumber && (
