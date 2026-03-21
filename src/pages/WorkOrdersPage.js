@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Plus, Search, Calendar, Package, MapPin } from 'lucide-react';
 import { getWorkOrders, createWorkOrder, searchClients, getNextDRNumber, getShipmentById } from '../services/api';
@@ -12,12 +12,15 @@ function WorkOrdersPage() {
   const [showNewModal, setShowNewModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState(() => {
-    return sessionStorage.getItem('wo_search') || '';
+    return searchParams.get('q') || '';
   });
   const updateSearch = (val) => {
     setSearchQuery(val);
-    if (val) sessionStorage.setItem('wo_search', val);
-    else sessionStorage.removeItem('wo_search');
+    if (val) {
+      setSearchParams({ q: val }, { replace: true });
+    } else {
+      setSearchParams({}, { replace: true });
+    }
   };
   const [statusFilter, setStatusFilter] = useState(() => {
     return localStorage.getItem('workorders_statusFilter') || 'all';
@@ -80,9 +83,10 @@ function WorkOrdersPage() {
     localStorage.setItem('workorders_sortBy', sortBy);
   }, [sortBy]);
 
+  // Initial load — skip if URL has a search query (search useEffect handles it)
+  const initialSearchRef = useRef(searchQuery);
   useEffect(() => {
-    // If we have a persisted search, let the search useEffect handle it
-    if (!searchQuery) {
+    if (!initialSearchRef.current) {
       loadOrders();
     }
     const interval = setInterval(() => {
@@ -92,14 +96,16 @@ function WorkOrdersPage() {
   }, []);
 
   // Server-side search for finding orders across all statuses (including shipped/archived)
+  const isFirstRun = useRef(true);
   useEffect(() => {
     if (!searchQuery || searchQuery.length < 2) {
-      if (searchQuery === '' && !loading) loadOrders();
+      if (searchQuery === '' && !isFirstRun.current) loadOrders();
+      isFirstRun.current = false;
       return;
     }
-    // If restoring from sessionStorage, run immediately (no debounce)
-    const isRestore = sessionStorage.getItem('wo_search') === searchQuery;
-    const delay = isRestore ? 0 : 400;
+    // No debounce on first run (restoring from URL), debounce for typing
+    const delay = isFirstRun.current ? 0 : 400;
+    isFirstRun.current = false;
     const timer = setTimeout(async () => {
       try {
         setLoading(true);
@@ -313,9 +319,20 @@ function WorkOrdersPage() {
                 placeholder="Search by client, DR#, PO#..."
                 value={searchQuery}
                 onChange={(e) => updateSearch(e.target.value)}
-                style={{ paddingLeft: 40 }}
+                style={{ paddingLeft: 40, paddingRight: searchQuery ? 36 : 12, borderColor: searchQuery ? '#1976d2' : undefined, background: searchQuery ? '#f0f7ff' : undefined }}
               />
+              {searchQuery && (
+                <button onClick={() => updateSearch('')}
+                  style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: '#1976d2', color: 'white', border: 'none', borderRadius: '50%', width: 22, height: 22, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 700 }}>
+                  ✕
+                </button>
+              )}
             </div>
+            {searchQuery && searchQuery.length >= 2 && (
+              <div style={{ fontSize: '0.8rem', color: '#1976d2', fontWeight: 600, marginTop: 4 }}>
+                🔍 Searching all statuses for "{searchQuery}" — {orders.length} results
+              </div>
+            )}
           </div>
           <select 
             className="form-select" 
