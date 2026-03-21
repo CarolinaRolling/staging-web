@@ -81,8 +81,10 @@ function WorkOrdersPage() {
   }, [sortBy]);
 
   useEffect(() => {
-    loadOrders();
-    // Auto-refresh every 30 seconds for live progress updates
+    // If we have a persisted search, let the search useEffect handle it
+    if (!searchQuery) {
+      loadOrders();
+    }
     const interval = setInterval(() => {
       if (!searchQuery) loadOrders(true);
     }, 30000);
@@ -92,10 +94,12 @@ function WorkOrdersPage() {
   // Server-side search for finding orders across all statuses (including shipped/archived)
   useEffect(() => {
     if (!searchQuery || searchQuery.length < 2) {
-      // Reset to normal active orders when search is cleared
       if (searchQuery === '' && !loading) loadOrders();
       return;
     }
+    // If restoring from sessionStorage, run immediately (no debounce)
+    const isRestore = sessionStorage.getItem('wo_search') === searchQuery;
+    const delay = isRestore ? 0 : 400;
     const timer = setTimeout(async () => {
       try {
         setLoading(true);
@@ -106,7 +110,7 @@ function WorkOrdersPage() {
       } finally {
         setLoading(false);
       }
-    }, 400); // debounce
+    }, delay);
     return () => clearTimeout(timer);
   }, [searchQuery]);
 

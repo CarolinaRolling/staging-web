@@ -312,10 +312,10 @@ function EstimatesPage() {
               {searching ? '⏳ Searching...' : `🔍 All statuses (${getFilteredEstimates().length} found)`}
             </span>
           )}
-          {!showArchived && (
+          {!showArchived && !showTrash && (
             <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none', paddingBottom: 0 }}>
               {['all', 'draft', 'sent', 'declined'].map(status => {
-                const count = status === 'all' ? estimates.length : estimates.filter(e => e.status === status).length;
+                const count = status === 'draft' ? estimates.filter(e => e.status === 'draft').length : 0;
                 return (
                 <button
                   key={status}
@@ -323,7 +323,7 @@ function EstimatesPage() {
                   onClick={() => setStatusFilter(status)}
                 >
                   {status.charAt(0).toUpperCase() + status.slice(1)}
-                  {status !== 'all' && count > 0 && <span style={{ marginLeft: 4, fontSize: '0.75rem', opacity: 0.7 }}>({count})</span>}
+                  {status === 'draft' && count > 0 && <span style={{ marginLeft: 4, fontSize: '0.75rem', opacity: 0.7 }}>({count})</span>}
                 </button>
                 );
               })}
